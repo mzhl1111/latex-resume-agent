@@ -1,0 +1,9 @@
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+jobs/*/*.pdf
+jobs/*/*.png
+outputs/*
+!outputs/.gitkeep
