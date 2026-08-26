@@ -24,6 +24,11 @@ jobs/<slug>/               One folder per target role
 outputs/                   Optional final exports
 ```
 
+## Local dependencies
+- Python 3
+- `pdflatex`
+- Poppler tools: `pdfinfo` and `pdftoppm`
+
 ## One-job workflow
 
 ### 1. Create a role folder
@@ -41,7 +46,7 @@ Example prompt:
 
 ### 4. Validate locally
 ```bash
-scripts/check_resume.sh jobs/stripe-ml-infra/resume.tex
+bash scripts/check_resume.sh jobs/stripe-ml-infra/resume.tex
 ```
 
 ### 5. Review
