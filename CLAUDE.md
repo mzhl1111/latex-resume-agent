@@ -26,9 +26,13 @@ Claude Code share one copy:
 - Guardrail phrases are in `profile/guardrails.json`; every number in the PDF must
   exist in `profile/work_history.md` or the proofreader fails it.
 - Personal data is gitignored: `profile/` (work_history.md, rules.md,
-  guardrails.json), `templates/`, `jobs/`, `outputs/`, `applications/`. Never commit them, and never
+  guardrails.json), `templates/`, `jobs/`, `outputs/`, `applications/`, `traces/`, `demo/`. Never commit them, and never
   copy personal details into tracked files (code, prompts, tests, README).
   `examples/` is a fictional stand-in; `python3 -m resume_agent init` copies it.
 - Never edit `templates/resume_base.tex` or anything in `profile/` while tailoring a
   resume. Changes to those are deliberate, separate requests.
+- Tracing: wrap new stages in `tracing.span("area.action", job=...)` and put
+  metadata in attributes only, never resume/JD/answer text. `python3 -m resume_agent
+  dashboard` shows the local traces. Regenerate `docs/dashboard.png` from
+  `demo-data`, never from real data.
 - Run tests with `python3 -m pytest -q`.

@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import tracing
+
 HEADER_RE = re.compile(
     r"<!-- harness: verdict=(?P<verdict>[A-Z ]+?) tex_sha256=(?P<sha>[0-9a-f]{64}) must_fix=(?P<n>\d+) -->"
 )
@@ -46,6 +48,9 @@ def record_review(job_dir: Path, review: str, *, source: str) -> Path:
         f"must_fix={len(must_fix)} -->\n<!-- source: {source} -->\n\n"
     )
     path.write_text(header + review.strip() + "\n")
+    with tracing.span("review.record", job=job_dir.name, verdict=verdict or "MALFORMED", must_fix=len(must_fix),
+                      round=n, source=source.split(" ")[0]):
+        pass
     return path
 
 

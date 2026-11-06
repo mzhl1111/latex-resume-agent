@@ -16,6 +16,7 @@ language, so the server must do the LLM work).
 from __future__ import annotations
 
 import base64
+import json
 import re
 import threading
 import uuid
@@ -25,7 +26,7 @@ from typing import Any, Callable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import __version__
+from . import __version__, tracing
 from .workspace import get_job
 
 PROTOCOL_VERSION = "0.3.0"
@@ -220,6 +221,22 @@ def make_handler(generate: Callable[..., Any] | None = None):
             body = await request.json()
         except Exception:
             return _rpc_error(None, -32700, "Parse error")
+        method = body.get("method")
+        action = find_action((body.get("params") or {}).get("message") or {}) if method == "message/send" else None
+        with tracing.span("a2a.request", method=method or "", action=(action or {}).get("action", "tailor_resume"
+                          if method == "message/send" else "")) as s:
+            resp = await _handle(body)
+            try:
+                payload = json.loads(resp.body)
+                state = ((payload.get("result") or {}).get("status") or {}).get("state")
+                s.set(state=state, rpc_error=(payload.get("error") or {}).get("code"))
+                if state == "failed" or payload.get("error"):
+                    s.set_error((payload.get("error") or {}).get("message") or "task failed")
+            except Exception:
+                pass
+            return resp
+
+    async def _handle(body: dict) -> JSONResponse:
         id_, method, params = body.get("id"), body.get("method"), body.get("params") or {}
 
         if method == "message/send":

@@ -1,6 +1,9 @@
 .git
 jobs
 applications
+traces
+demo
+docs
 profile
 templates
 private-backup

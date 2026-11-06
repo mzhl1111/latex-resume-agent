@@ -44,6 +44,7 @@ class BearerAuth:
 
 
 def create_app(*, token: str | None = None, generate=None):
+    os.environ.setdefault("RESUME_TRACE_MODE", "server")
     token = token if token is not None else os.environ.get("RESUME_AGENT_TOKEN") or None
     # host="0.0.0.0" turns off the localhost-only DNS-rebinding guard; auth is the bearer token instead.
     app = mcp.streamable_http_app(streamable_http_path="/mcp", host="0.0.0.0", stateless_http=True)

@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 import mcp.types as t
 from mcp.server.mcpserver import MCPServer
 
-from . import __version__, applications, paths
+from . import __version__, applications, paths, tracing
 from .jd_fetch import FetchError, fetch_jd, slugify
 from .proofread import proofread
 from .workspace import get_job, new_job
@@ -40,7 +40,26 @@ question with the answer you gave. Report later status changes with update_appli
 # LaTeX primitives that could read/write files outside the job folder.
 _UNSAFE_TEX = re.compile(r"\\(input|include|openin|openout|write|write18|immediate|read|catcode|csname)(?![a-zA-Z])")
 
-mcp = MCPServer(name="latex-resume-agent", version=__version__, instructions=INSTRUCTIONS)
+async def _trace_tool_calls(ctx, call_next):
+    """Server middleware: one span per tools/call, named mcp.tool with the tool name."""
+    if getattr(ctx, "method", None) != "tools/call":
+        return await call_next(ctx)
+    params = getattr(ctx, "params", None) or {}
+    name = params.get("name") if isinstance(params, dict) else getattr(params, "name", None)
+    args = (params.get("arguments") if isinstance(params, dict) else getattr(params, "arguments", None)) or {}
+    with tracing.span("mcp.tool", tool=name or "", job=args.get("slug") if isinstance(args, dict) else None) as s:
+        result = await call_next(ctx)
+        is_error = getattr(result, "is_error", None)
+        if is_error is None and isinstance(result, dict):
+            is_error = result.get("isError")
+        s.set(is_error=bool(is_error))
+        if is_error:
+            s.set_error("tool returned isError")
+        return result
+
+
+mcp = MCPServer(name="latex-resume-agent", version=__version__, instructions=INSTRUCTIONS,
+                middleware=[_trace_tool_calls])
 
 
 def _pdf_resource(slug: str) -> t.EmbeddedResource:

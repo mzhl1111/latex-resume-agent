@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import gate, paths
+from . import gate, paths, tracing
 from .jd_fetch import slugify
 
 SCHEMA_VERSION = 1
@@ -256,6 +256,26 @@ def record_application(
     jobs_dir: Path | None = None,
 ) -> dict:
     """Record a submitted application. Returns {"id", "path", "created", "warnings", "record"}."""
+    with tracing.span("application.record", job=slug or "", platform=detect_platform(job_url or ""),
+                      submitted_by=submitted_by or "") as s:
+        res = _record(**{k: v for k, v in locals().items() if k != "s"})
+        rec = res["record"]
+        s.set(
+            created=res["created"], application_id=res["id"], company=rec["job"].get("company", ""),
+            role=rec["job"].get("role", ""), questions=len(rec.get("questions", [])),
+            cover_letter=bool(rec.get("cover_letter")),
+            verified=(rec["resume"].get("verification") or {}).get("deliverable"),
+            matches_generated=rec["resume"].get("matches_generated"), warnings=len(res["warnings"]),
+        )
+        return res
+
+
+def _record(
+    *,
+    job_url, slug, resume_pdf_base64, company, role, location, submitted_at, platform, confirmation_id,
+    submitted_by, cover_letter_text, cover_letter_base64, cover_letter_filename, questions, attachments,
+    jd_text, notes, extra, idempotency_key, fetch_jd_snapshot, apps_dir, jobs_dir,
+) -> dict:
     if not re.match(r"^https?://", job_url or ""):
         raise ApplicationError("job_url must be an http(s) URL")
     if not slug and not resume_pdf_base64:
@@ -414,6 +434,14 @@ def update_application(
     apps_dir: Path | None = None,
 ) -> dict:
     """Append a timeline event (status change and/or note) and merge extra fields."""
+    with tracing.span("application.update", application_id=app_id, status=status or "") as s:
+        rec = _update(app_id, status=status, note=note, at=at, by=by, add_questions=add_questions,
+                      confirmation_id=confirmation_id, extra=extra, apps_dir=apps_dir)
+        s.set(company=rec["job"].get("company", ""), status=rec["status"])
+        return rec
+
+
+def _update(app_id, *, status, note, at, by, add_questions, confirmation_id, extra, apps_dir) -> dict:
     if status and status not in STATUSES:
         raise ApplicationError(f"status must be one of {', '.join(STATUSES)}")
     if not (status or note or add_questions or confirmation_id or extra):

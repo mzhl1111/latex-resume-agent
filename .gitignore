@@ -17,4 +17,6 @@ __pycache__/
 /jobs/*
 !/jobs/.gitkeep
 /applications/
+/traces/
+/demo/
 /private-backup/

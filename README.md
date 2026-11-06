@@ -61,6 +61,9 @@ resume_agent/                      Shared Python core
   harness.py                         Claude Code hook policy (writer/verifier separation)
   gate.py                            harness-stamped review records + delivery gate
   applications.py                    submitted-application tracker (applications/, index.md/csv)
+  tracing.py                         pluggable tracer: local JSONL (default) | otel | none | module:Class
+  dashboard.py, dashboard.html       local dashboard over traces/ + applications/
+  demo.py                            fictional demo data generator
   llm_pipeline.py                    server-side writer → proofread → reviewer loop (Anthropic API)
   mcp_server.py, a2a_server.py, server.py   MCP + A2A over one HTTP app
 scripts/                           Original shell helpers (still work)
@@ -217,6 +220,60 @@ What gets checked and stored at record time:
 
 Hooks block agents from editing `applications/` directly. Changes go through the CLI or tools so the
 index and hashes stay consistent.
+
+## Tracing and dashboard
+
+![Dashboard with fictional demo data](docs/dashboard.png)
+
+*Screenshot generated from fictional demo data (`python3 -m resume_agent demo-data`).*
+
+### Tracing (pluggable)
+Every stage emits spans through `resume_agent.tracing`. The backend is chosen with `RESUME_TRACER`:
+
+| Value | Where spans go |
+|---|---|
+| `local` (default) | JSON lines in `traces/spans-YYYY-MM-DD.jsonl` (gitignored; `RESUME_TRACES_DIR` to move it). The dashboard reads these. |
+| `otel` | OpenTelemetry API, with attributes prefixed `resume.`. If the SDK and OTLP exporter are installed (`pip install ".[otel]"`, already in the Docker image) and `OTEL_EXPORTER_OTLP_ENDPOINT` is set, an OTLP/HTTP exporter is configured automatically. Otherwise the host process's provider is used. |
+| `none` | Tracing off. |
+| `pkg.module:MyTracer` | Your own `resume_agent.tracing.Tracer` subclass. Implement `span(name, attrs)` as a context manager. |
+
+Combine backends with commas. For example, `RESUME_TRACER=local,otel` keeps the local dashboard working
+while also exporting to Jaeger, Honeycomb, Grafana and so on.
+
+Spans cover: JD fetch, workspace creation, LaTeX compile, proofread (findings), LLM calls (model, role,
+input/output tokens), server generation and verification, review records (round, verdict), delivery,
+application record/update, every MCP tool call (server middleware), A2A requests, and harness actions
+(denials, verifier prompt rewrites, writer/verifier agent durations).
+
+Spans hold metadata only: ids, timings, counts, verdicts, company/role, model, tokens. They never hold
+resume text, JD text or application answers. A broken tracer config falls back to `none` instead of
+breaking resume generation.
+
+### Dashboard
+```bash
+python3 -m resume_agent dashboard --open              # http://127.0.0.1:8050, re-reads traces/ + applications/ on each load
+python3 -m resume_agent dashboard --export report.html  # one self-contained offline HTML file
+docker compose --profile dashboard up dashboard          # same, from the container volumes
+
+python3 -m resume_agent demo-data --out demo             # fictional data to try it
+python3 -m resume_agent dashboard --traces demo/traces --applications demo/applications
+```
+
+What it shows:
+- **Key numbers:** resumes tailored, first-pass verifier PASS rate, average rounds to PASS,
+  applications submitted, response rate, LLM tokens.
+- **Activity:** resumes tailored vs applications submitted over time.
+- **Application funnel:** submitted → response → screen → interview → offer.
+- **Verifier verdicts by round.**
+- **What the proofreader catches:** its most common findings.
+- **Where time goes:** median and p95 duration per stage.
+- **Recent tailoring runs:** click one to see a per-run trace waterfall.
+- **Harness enforcement:** denials by role and reason.
+- **Applications table.**
+
+Filters for date range and run mode scope everything on the page. Each chart has a table view and a
+hover tooltip, and the page follows your OS light/dark setting (with a toggle). It has no
+dependencies, makes no network calls and is a single HTML file.
 
 ## Proofreading checks
 `resume_agent/proofread.py` fails the resume on:

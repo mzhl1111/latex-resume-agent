@@ -22,10 +22,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
-from . import gate
+from . import gate, tracing
 
 WRITER = "resume-writer"
 VERIFIER = "resume-proofreader"
@@ -243,7 +244,7 @@ def subagent_start(ev: dict) -> dict | None:
     state = load_state(ev)
     queue = state["pending"].setdefault(kind, [])
     job = queue.pop(0) if queue else None
-    state.setdefault("agents", {})[agent_id] = {"type": kind, "job": job}
+    state.setdefault("agents", {})[agent_id] = {"type": kind, "job": job, "started": time.time()}
     save_state(ev, state)
     if kind == VERIFIER and job:
         ctx = (
@@ -302,12 +303,38 @@ def subagent_stop(ev: dict) -> dict | None:
 # --------------------------------------------------------------------------- entry
 
 
+def _trace(ev: dict, out: Any) -> None:
+    """Trace what the harness did: denials, rewrites and finished subagents (not every allowed call)."""
+    name, role = ev.get("hook_event_name"), role_of(ev)
+    if name == "PreToolUse" and out:
+        hso = out.get("hookSpecificOutput", {})
+        decision = "rewrite" if hso.get("updatedInput") else hso.get("permissionDecision", "")
+        reason = hso.get("permissionDecisionReason", "").removeprefix("[resume harness] ")
+        job = find_job(ev, json.dumps(ev.get("tool_input") or {})) or ""
+        with tracing.span("harness.decision", role=role, tool=ev.get("tool_name", ""), decision=decision,
+                          reason=reason[:160], job=job.removeprefix("jobs/")):
+            pass
+    elif name == "SubagentStop" and ev.get("agent_type") in (WRITER, VERIFIER):
+        info = load_state(ev).get("agents", {}).get(ev.get("agent_id", ""), {})
+        started = info.get("started")
+        with tracing.span("agent." + ("writer" if ev["agent_type"] == WRITER else "verifier"),
+                          job=(info.get("job") or "").removeprefix("jobs/"), agent_id=ev.get("agent_id", ""),
+                          review=info.get("review", ""), bounced=bool(out),
+                          agent_seconds=round(time.time() - started, 1) if started else None):
+            pass
+
+
 def handle(ev: dict) -> Any:
     name = ev.get("hook_event_name")
+    out = None
     if name == "PreToolUse":
-        return pre_tool_use(ev)
-    if name == "SubagentStart":
-        return subagent_start(ev)
-    if name == "SubagentStop":
-        return subagent_stop(ev)
-    return None
+        out = pre_tool_use(ev)
+    elif name == "SubagentStart":
+        out = subagent_start(ev)
+    elif name == "SubagentStop":
+        out = subagent_stop(ev)
+    try:
+        _trace(ev, out)
+    except Exception:
+        pass  # tracing never changes a hook decision
+    return out

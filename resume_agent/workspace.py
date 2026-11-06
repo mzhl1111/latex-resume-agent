@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import paths
+from . import paths, tracing
 
 
 @dataclass
@@ -73,6 +74,21 @@ def new_job(
     If the folder exists and ``overwrite`` is False, a numeric suffix is added
     so earlier tailored versions are never clobbered.
     """
+    meta = {}
+    if jd_markdown:
+        t = re.search(r"^#\s+(.+)$", jd_markdown, re.M)
+        c = re.search(r"^- \*\*Company:\*\*\s*(.+)$", jd_markdown, re.M)
+        if t and t.group(1).strip().lower() != "job description":
+            meta["role"] = t.group(1).strip()
+        if c:
+            meta["company"] = c.group(1).strip()
+    with tracing.span("job.create", job=slug, **meta) as s:
+        ws = _new_job(slug, jd_markdown, jobs_dir=jobs_dir, overwrite=overwrite)
+        s.set(job=ws.slug)
+        return ws
+
+
+def _new_job(slug, jd_markdown, *, jobs_dir, overwrite) -> JobWorkspace:
     paths.require_profile()
     jobs_dir = jobs_dir or paths.JOBS_DIR
     base = _validate_slug(slug)
