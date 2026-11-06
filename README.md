@@ -9,9 +9,34 @@ It runs two ways on one shared core:
 | Mode | Who does the LLM work | Entry point |
 |---|---|---|
 | **Claude Code** | Claude Code on your plan | `/resume <job-url>` |
-| **MCP / A2A server** | the calling agent, or the server with an `ANTHROPIC_API_KEY` | `docker compose up` |
+| **MCP / A2A server** | the calling agent, or the server with an `ANTHROPIC_API_KEY` | `docker compose up`, or [a Mac + Cloudflare Tunnel](deploy/macos/README.md) |
 
 Codex still works too: `AGENTS.md` is the single copy of the rules, and `CLAUDE.md` imports it.
+
+## In use: Meta's Muse agent
+I run this server on my MacBook behind a Cloudflare Tunnel ([setup](deploy/macos/README.md)), and my
+**Muse** agent (Meta's personal AI agent) uses it over MCP. Muse finds a job posting, calls
+`generate_resume` (or the caller-driven `start_job` → `write_resume` → `verify_resume` loop) to get a
+verified one-page PDF, submits the application, then calls `record_application` with the PDF it used,
+the cover letter and every application question it answered. Status changes come back in through
+`update_application`, or I make them in the [dashboard](#dashboard).
+
+Muse doesn't have an MCP settings menu. You ask it to build a custom integration to a remote MCP
+server, and it saves that as a reusable skill. The bearer token goes into Muse's credentials store
+when it asks for it, not into the chat. The prompt I use:
+
+```text
+Build a custom integration to my resume MCP server at https://<TUNNEL_HOSTNAME>/mcp.
+It is a remote MCP server over streamable HTTP. Authenticate every request with an
+"Authorization: Bearer <token>" header; ask me for the token through the secure credentials prompt.
+Use generate_resume (or start_job, write_resume, verify_resume, get_resume_pdf) to tailor my resume
+to a job link, and after you actually submit an application, always call record_application with the
+job_url, the slug, the cover letter text and every application question with the exact answer you gave.
+Save this as a skill.
+```
+
+`deploy/macos/resumectl token` prints the URL and token for your own deployment. The same server
+works for any other MCP client (Claude, Cursor, ...) or A2A agent; see [Mode 2](#mode-2-mcp--a2a-server).
 
 ## Your data stays local
 Everything personal is gitignored: `profile/` (your fact bank, rules and guardrails), `templates/`
@@ -67,6 +92,7 @@ resume_agent/                      Shared Python core
   llm_pipeline.py                    server-side writer → proofread → reviewer loop (Anthropic API)
   mcp_server.py, a2a_server.py, server.py   MCP + A2A over one HTTP app
 scripts/                           Original shell helpers (still work)
+deploy/macos/                      Mac + Cloudflare Tunnel deployment (resumectl, launchd, cloudflared templates)
 jobs/<slug>/                       One folder per target role
 outputs/                           Final PDFs
 ```
@@ -127,6 +153,10 @@ python3 -m resume_agent deliver jobs/acme-ml --name Jane_Doe_Acme_MLE.pdf
 ```
 
 ## Mode 2: MCP / A2A server
+
+Two ways to host it: Docker (below), or natively on a Mac with a Cloudflare Tunnel in front, which
+needs no open ports and only exposes the agent endpoints. That second option is
+[`deploy/macos/`](deploy/macos/README.md): `resumectl install`, `tunnel-setup`, `start`, `doctor`.
 
 ```bash
 cp .env.example .env    # set RESUME_AGENT_TOKEN, optionally ANTHROPIC_API_KEY and PUBLIC_BASE_URL

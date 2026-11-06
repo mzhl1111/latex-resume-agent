@@ -1,0 +1,24 @@
+# Cloudflare Tunnel config for the resume agent (locally-managed named tunnel).
+#
+# `deploy/macos/resumectl tunnel-setup` renders this into ~/.cloudflared/resume-agent.yml,
+# outside the repo, with your tunnel id, hostname and port filled in. Don't commit a filled-in
+# copy, and never commit the credentials JSON.
+#
+# Only the agent-facing endpoints are routed. The dashboard (port 8050), /files/ and the
+# dashboard editing API are local-only and are NOT reachable through the tunnel. Everything else
+# gets a 404 from Cloudflare's edge before it reaches your Mac.
+
+tunnel: __TUNNEL_ID__
+credentials-file: __CREDENTIALS_FILE__
+
+ingress:
+  # MCP (streamable HTTP), A2A JSON-RPC and the health check
+  - hostname: __TUNNEL_HOSTNAME__
+    path: ^/(mcp|a2a|healthz)/?$
+    service: http://127.0.0.1:__RESUME_PORT__
+  # A2A agent discovery
+  - hostname: __TUNNEL_HOSTNAME__
+    path: ^/\.well-known/agent(-card)?\.json$
+    service: http://127.0.0.1:__RESUME_PORT__
+  # Everything else, including the dashboard paths
+  - service: http_status:404

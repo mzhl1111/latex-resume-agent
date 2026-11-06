@@ -20,3 +20,8 @@ __pycache__/
 /traces/
 /demo/
 /private-backup/
+
+# macOS deployment: secrets and rendered files stay local
+/deploy/macos/.env
+/deploy/macos/*.local.*
+/.venv/

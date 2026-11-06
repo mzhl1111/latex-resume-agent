@@ -7,6 +7,7 @@
 
 Env:
     RESUME_AGENT_TOKEN   if set, /mcp and /a2a require "Authorization: Bearer <token>"
+    RESUME_REQUIRE_TOKEN refuse to start unless RESUME_AGENT_TOKEN is set (>= 24 chars); set for public exposure
     PUBLIC_BASE_URL      URL advertised in the agent card (default: from request)
     ANTHROPIC_API_KEY    enables generate_resume / A2A generation
     RESUME_JOBS_DIR      where job workspaces are written (mount a volume here)
@@ -43,9 +44,21 @@ class BearerAuth:
         await self.app(scope, receive, send)
 
 
+MIN_TOKEN_LEN = 24
+
+
+class InsecureConfig(RuntimeError):
+    pass
+
+
 def create_app(*, token: str | None = None, generate=None):
     os.environ.setdefault("RESUME_TRACE_MODE", "server")
     token = token if token is not None else os.environ.get("RESUME_AGENT_TOKEN") or None
+    if os.environ.get("RESUME_REQUIRE_TOKEN", "").lower() in ("1", "true", "yes") and len(token or "") < MIN_TOKEN_LEN:
+        raise InsecureConfig(
+            f"RESUME_REQUIRE_TOKEN is set but RESUME_AGENT_TOKEN is missing or shorter than {MIN_TOKEN_LEN} chars; "
+            "refusing to expose /mcp and /a2a without authentication (generate one: openssl rand -hex 32)"
+        )
     # host="0.0.0.0" turns off the localhost-only DNS-rebinding guard; auth is the bearer token instead.
     app = mcp.streamable_http_app(streamable_http_path="/mcp", host="0.0.0.0", stateless_http=True)
 
