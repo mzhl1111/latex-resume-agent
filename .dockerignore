@@ -1,0 +1,13 @@
+.git
+jobs
+profile
+templates
+private-backup
+jobs-server
+outputs
+tests
+**/__pycache__
+.env
+*.pdf
+*.png
+*.log

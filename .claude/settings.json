@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m resume_agent:*)",
+      "Bash(python3 -m pytest:*)",
+      "Bash(bash scripts/check_resume.sh:*)",
+      "Bash(mkdir -p outputs)",
+      "Bash(cp jobs/*)",
+      "Read(./**)",
+      "Edit(./jobs/**)",
+      "Write(./jobs/**)",
+      "WebFetch"
+    ],
+    "deny": [
+      "Edit(./profile/**)",
+      "Edit(./templates/**)"
+    ]
+  }
+}

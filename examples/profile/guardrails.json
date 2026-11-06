@@ -1,0 +1,29 @@
+{
+  "_comment": "FICTIONAL EXAMPLE. Phrases the deterministic proofreader flags in the compiled resume text. severity=error blocks delivery; warn asks a reviewer to confirm. Case-insensitive Python regexes. Keep in sync with the ownership boundaries in rules.md.",
+  "rules": [
+    {
+      "id": "sole-ownership",
+      "pattern": "\\b(sole(ly)?|single[- ]handedly|by myself|entire(ly)? own(ed)?)\\b",
+      "severity": "error",
+      "message": "Sole-ownership language contradicts the ownership boundaries in rules.md."
+    },
+    {
+      "id": "ranking-training-claimed",
+      "pattern": "\\b(trained|built|owned|developed)\\b[^.;]{0,40}\\branking model\\b",
+      "severity": "error",
+      "message": "Ranking-model training was owned by another engineer; only the feature pipeline and evaluation harness are claimable."
+    },
+    {
+      "id": "eval-ownership",
+      "pattern": "\\b(led|owned|drove)\\b[^.;]{0,40}\\bevaluation\\b",
+      "severity": "warn",
+      "message": "LLM evaluation became org-wide; 'designed the initial service' is safe, owning it is not."
+    },
+    {
+      "id": "platform-ownership",
+      "pattern": "\\b(built|owned|architected|led)\\b[^.;]{0,30}\\b(deployment platform|the platform)\\b",
+      "severity": "error",
+      "message": "The Contoso deployment platform was a team effort: say 'contributed to'."
+    }
+  ]
+}
