@@ -3,7 +3,17 @@
 *.out
 *.toc
 *.synctex.gz
-jobs/*/*.pdf
-jobs/*/*.png
 outputs/*
 !outputs/.gitkeep
+jobs-server/
+.env
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Personal data stays local (see examples/ for the fictional layout)
+/profile/
+/templates/
+/jobs/*
+!/jobs/.gitkeep
+/private-backup/

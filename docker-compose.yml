@@ -1,0 +1,20 @@
+services:
+  resume-agent:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # Required when exposed beyond localhost: callers send "Authorization: Bearer <token>"
+      RESUME_AGENT_TOKEN: ${RESUME_AGENT_TOKEN:?set RESUME_AGENT_TOKEN in .env}
+      # Optional: enables generate_resume (MCP) and A2A generation on the server
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      RESUME_WRITER_MODEL: ${RESUME_WRITER_MODEL:-claude-sonnet-5-5}
+      RESUME_REVIEWER_MODEL: ${RESUME_REVIEWER_MODEL:-claude-sonnet-5-5}
+      # URL advertised in the A2A agent card, e.g. https://resume.example.com
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes:
+      - ./jobs-server:/data/jobs
+      # your private data (gitignored); run `python3 -m resume_agent init` first
+      - ./profile:/app/profile:ro
+      - ./templates:/app/templates:ro
+    restart: unless-stopped
