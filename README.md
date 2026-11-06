@@ -45,6 +45,7 @@ can be checked mechanically into code (`resume_agent/proofread.py`, `profile/gua
 AGENTS.md                          Generic rules (shared by Codex, Claude Code, the server)
 CLAUDE.md                          Claude Code entry; imports AGENTS.md
 .claude/commands/resume.md         /resume slash command (full workflow)
+.claude/commands/record-application.md  /record-application: log a submitted application
 .claude/agents/resume-writer.md    Writer subagent
 .claude/agents/resume-proofreader.md  Verifier subagent (also the server's verifier prompt)
 .claude/hooks/resume_harness.py    Hook shim → resume_agent/harness.py (role enforcement)
@@ -59,6 +60,7 @@ resume_agent/                      Shared Python core
   workspace.py                       jobs/<slug>/ folders
   harness.py                         Claude Code hook policy (writer/verifier separation)
   gate.py                            harness-stamped review records + delivery gate
+  applications.py                    submitted-application tracker (applications/, index.md/csv)
   llm_pipeline.py                    server-side writer → proofread → reviewer loop (Anthropic API)
   mcp_server.py, a2a_server.py, server.py   MCP + A2A over one HTTP app
 scripts/                           Original shell helpers (still work)
@@ -147,6 +149,7 @@ All endpoints except health and the agent card require `Authorization: Bearer $R
 | `write_resume(slug, resume_tex, analysis_md?)` | Saves, compiles and proofreads; returns the report and the rendered page image. |
 | `verify_resume(slug)` | Independent verifier in a fresh model call that sees only facts, rules, JD, PDF text and page image (never your analysis). Needs `ANTHROPIC_API_KEY`. |
 | `proofread_resume(slug)` / `get_resume_pdf(slug)` / `list_jobs()` / `fetch_job_description(url)` | Helpers. |
+| `record_application(...)` / `update_application` / `list_applications` / `get_application` | Track submitted applications (see below). |
 
 There are two ways a calling agent can use the server:
 - **The caller does the writing (no server key needed).** Use the `tailor_resume` prompt:
@@ -175,6 +178,45 @@ Send a text part with a job URL (any extra text becomes instructions), or a data
 `{"jd_url", "jd_text", "slug", "instructions"}`. The completed task has a `resume.pdf` file artifact and
 an `analysis.md` text artifact. Pass `configuration.blocking: false` to get a `working` task back
 immediately, then poll `tasks/get`. Server-side generation requires `ANTHROPIC_API_KEY`.
+
+## Tracking submitted applications
+After an application is **actually submitted**, record it. Every entry point writes the same local
+store, `applications/`, which is gitignored. With Docker, it's mounted from your machine.
+
+```text
+applications/
+  index.md                 table of every application, newest first (status, company, role, link, verified?)
+  index.csv                same, for spreadsheets
+  2026-11-06_acme_senior-ml-engineer-search_3f9a2c/
+    application.json       record: job, timestamps, resume sha256 + verification, Q&A, status timeline
+    resume.pdf             the exact PDF that was submitted
+    resume.tex             its source (when it came from a job workspace)
+    jd.md                  job-posting snapshot (postings disappear)
+    cover_letter.md|.pdf   cover letter, if any
+    answers.md             every application question and the answer given
+    attachments/           anything else uploaded
+```
+
+| From | Record | Update / query |
+|---|---|---|
+| MCP | `record_application(job_url, slug \| resume_pdf_base64, questions=[{question, answer}], cover_letter_text \| cover_letter_base64, confirmation_id, submitted_at, notes, extra, idempotency_key)` | `update_application`, `list_applications`, `get_application` |
+| A2A | data part `{"action": "record_application", ...same fields}` | `{"action": "update_application" \| "list_applications" \| "get_application", ...}` |
+| CLI | `python3 -m resume_agent app record --url U --slug S --qa qa.md --cover-letter cl.md` | `app update <id> --status interview --note ...`, `app list`, `app show <id>` |
+| Claude Code | `/record-application <url>`, then paste the questions, answers and cover letter | same CLI |
+
+What gets checked and stored at record time:
+- **The exact resume:** SHA-256 of the submitted PDF, and whether it matches the generated one for that job.
+- **Verification:** the delivery-gate verdict at submission time, so an application sent with an
+  unverified resume is flagged in the index.
+- **Job details:** company, role and location from the job's `jd.md`. If none is available, the
+  posting is fetched (best effort). The platform is detected from the URL.
+- **Duplicates:** the same URL already recorded gives a warning. A repeated `idempotency_key` returns
+  the existing record, so agent retries are safe.
+- **Statuses:** submitted, acknowledged, screen, assessment, interview, offer, accepted, rejected,
+  withdrawn, ghosted. Each change is appended to the timeline with a timestamp and a note.
+
+Hooks block agents from editing `applications/` directly. Changes go through the CLI or tools so the
+index and hashes stay consistent.
 
 ## Proofreading checks
 `resume_agent/proofread.py` fails the resume on:

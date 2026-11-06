@@ -14,6 +14,8 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     volumes:
       - ./jobs-server:/data/jobs
+      # submitted-application records land here on your machine (one folder each + index.md/csv)
+      - ./applications:/data/applications
       # your private data (gitignored); run `python3 -m resume_agent init` first
       - ./profile:/app/profile:ro
       - ./templates:/app/templates:ro
