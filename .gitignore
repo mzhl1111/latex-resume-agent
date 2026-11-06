@@ -16,4 +16,5 @@ __pycache__/
 /templates/
 /jobs/*
 !/jobs/.gitkeep
+/applications/
 /private-backup/

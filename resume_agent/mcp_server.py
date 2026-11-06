@@ -18,10 +18,11 @@ import re
 from typing import Any
 
 import anyio
+from pydantic import BaseModel, Field
 import mcp.types as t
 from mcp.server.mcpserver import MCPServer
 
-from . import __version__, paths
+from . import __version__, applications, paths
 from .jd_fetch import FetchError, fetch_jd, slugify
 from .proofread import proofread
 from .workspace import get_job, new_job
@@ -31,7 +32,10 @@ Fast path: call generate_resume with a job URL (needs the server's API key).
 Do-it-yourself path (works without a server key): start_job -> get_resume_context ->
 write_resume (repeat until proofread passes and the page looks right) -> get_resume_pdf.
 Never invent facts: every claim and number must come from the work history returned by
-get_resume_context."""
+get_resume_context.
+After you actually SUBMIT an application with the generated PDF, call record_application with the
+job URL, the slug (or the exact PDF bytes you uploaded), any cover letter, and every application
+question with the answer you gave. Report later status changes with update_application."""
 
 # LaTeX primitives that could read/write files outside the job folder.
 _UNSAFE_TEX = re.compile(r"\\(input|include|openin|openout|write|write18|immediate|read|catcode|csname)(?![a-zA-Z])")
@@ -236,6 +240,122 @@ async def generate_resume(
     return t.CallToolResult(content=content, structured_content=res.to_dict())
 
 
+class QuestionAnswer(BaseModel):
+    question: str = Field(description="The application form question, verbatim")
+    answer: str = Field(default="", description="The exact answer submitted")
+
+
+class Attachment(BaseModel):
+    filename: str = Field(description="e.g. portfolio.pdf")
+    content_base64: str
+    label: str = ""
+
+
+def _app_result(res: dict) -> t.CallToolResult:
+    rec = res["record"]
+    text = (
+        f"{'Recorded' if res['created'] else 'Already recorded'} application {res['id']}\n"
+        f"{rec['job'].get('company', '')} · {rec['job'].get('role', '')} · status {rec['status']}"
+        + ("\nWarnings:\n- " + "\n- ".join(res["warnings"]) if res["warnings"] else "")
+    )
+    return t.CallToolResult(
+        content=[t.TextContent(type="text", text=text)],
+        structured_content={k: v for k, v in res.items() if k != "path"},
+    )
+
+
+def _app_error(exc: Exception) -> t.CallToolResult:
+    return t.CallToolResult(content=[t.TextContent(type="text", text=str(exc))], is_error=True)
+
+
+@mcp.tool(
+    description="Record that an application was ACTUALLY SUBMITTED. Call this only after submitting. Stores the "
+    "job link, submission time, the exact resume PDF used (from slug, or pass resume_pdf_base64 if you "
+    "uploaded a different file), cover letter, every additional application question with the answer given, "
+    "confirmation id and notes. A job-posting snapshot is saved, since postings disappear. Pass "
+    "idempotency_key to make retries safe. Returns the application id for later update_application calls."
+)
+async def record_application(
+    job_url: str,
+    slug: str | None = None,
+    resume_pdf_base64: str | None = None,
+    submitted_at: str | None = Field(default=None, description="ISO 8601; defaults to now"),
+    company: str | None = None,
+    role: str | None = None,
+    location: str | None = None,
+    platform: str | None = Field(default=None, description="ATS / site; detected from the URL if omitted"),
+    confirmation_id: str | None = None,
+    submitted_by: str | None = Field(default=None, description="Name of the submitting agent or person"),
+    cover_letter_text: str | None = None,
+    cover_letter_base64: str | None = None,
+    cover_letter_filename: str | None = None,
+    questions: list[QuestionAnswer] | None = None,
+    attachments: list[Attachment] | None = None,
+    jd_text: str | None = None,
+    notes: str | None = None,
+    extra: dict[str, Any] | None = Field(default=None, description="Anything else, e.g. salary expectation, referral"),
+    idempotency_key: str | None = None,
+) -> t.CallToolResult:
+    kwargs = dict(
+        job_url=job_url, slug=slug, resume_pdf_base64=resume_pdf_base64, submitted_at=submitted_at,
+        company=company, role=role, location=location, platform=platform, confirmation_id=confirmation_id,
+        submitted_by=submitted_by, cover_letter_text=cover_letter_text, cover_letter_base64=cover_letter_base64,
+        cover_letter_filename=cover_letter_filename,
+        questions=[q.model_dump() for q in questions or []],
+        attachments=[a.model_dump() for a in attachments or []],
+        jd_text=jd_text, notes=notes, extra=extra, idempotency_key=idempotency_key,
+    )
+    try:
+        res = await anyio.to_thread.run_sync(lambda: applications.record_application(**kwargs))
+    except applications.ApplicationError as exc:
+        return _app_error(exc)
+    return _app_result(res)
+
+
+@mcp.tool(
+    description="Update a recorded application: change status (one of "
+    + ", ".join(applications.STATUSES)
+    + "), add a timeline note, add more question/answer pairs, set the confirmation id, or merge extra fields."
+)
+def update_application(
+    application_id: str,
+    status: str | None = None,
+    note: str | None = None,
+    at: str | None = None,
+    by: str | None = None,
+    add_questions: list[QuestionAnswer] | None = None,
+    confirmation_id: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> t.CallToolResult:
+    try:
+        rec = applications.update_application(
+            application_id, status=status, note=note, at=at, by=by,
+            add_questions=[q.model_dump() for q in add_questions or []],
+            confirmation_id=confirmation_id, extra=extra,
+        )
+    except applications.ApplicationError as exc:
+        return _app_error(exc)
+    return t.CallToolResult(
+        content=[t.TextContent(type="text", text=f"{application_id}: status {rec['status']}, {len(rec['events'])} events")],
+        structured_content=applications.summary(rec),
+    )
+
+
+@mcp.tool(structured_output=True, description="List recorded applications, newest first. Filter by status, company substring, or since (ISO date).")
+def list_applications(status: str | None = None, company: str | None = None, since: str | None = None) -> list[dict[str, Any]]:
+    return applications.list_applications(status=status, company=company, since=since)
+
+
+@mcp.tool(description="Full record of one application: job, resume hash + verification, cover letter, Q&A, timeline, files.")
+def get_application(application_id: str) -> t.CallToolResult:
+    try:
+        rec = applications.get_application(application_id)
+    except applications.ApplicationError as exc:
+        return _app_error(exc)
+    rec.pop("path", None)
+    return t.CallToolResult(content=[t.TextContent(type="text", text=json.dumps(rec, indent=2))], structured_content=rec)
+
+
 @mcp.prompt(description="Step-by-step loop for an agent tailoring the resume itself with this server's tools.")
 def tailor_resume(job_url: str) -> str:
     return f"""Tailor the resume for {job_url}.
@@ -248,4 +368,6 @@ def tailor_resume(job_url: str) -> str:
    to your reasoning. Fix its MUST FIX items with write_resume and call verify_resume again (max 3 rounds).
    If the server has no API key, hand the PDF, reviewer_checklist_md, profile_rules_md and work_history_md
    to a separate agent that has not seen this conversation.
-6. get_resume_pdf(slug) and hand the PDF to the user."""
+6. get_resume_pdf(slug) and use that exact PDF for the application.
+7. After the application is actually submitted, call record_application(job_url="{job_url}", slug=..., questions=[...],
+   cover_letter_text=...) with every additional question and the answer you gave."""

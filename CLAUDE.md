@@ -20,10 +20,13 @@ Claude Code share one copy:
   - `python3 -m resume_agent check <tex>` — compile, 1-page check, PNG render
   - `python3 -m resume_agent proofread <tex>` — compile + layout/fact/guardrail checks,
     writes `proofread.md` next to the tex; exit code 1 means there are errors
+- After the user says they submitted an application, run `/record-application` (or
+  `python3 -m resume_agent app record ...`). Record answers verbatim; never edit
+  files under `applications/` directly.
 - Guardrail phrases are in `profile/guardrails.json`; every number in the PDF must
   exist in `profile/work_history.md` or the proofreader fails it.
 - Personal data is gitignored: `profile/` (work_history.md, rules.md,
-  guardrails.json), `templates/`, `jobs/`, `outputs/`. Never commit them, and never
+  guardrails.json), `templates/`, `jobs/`, `outputs/`, `applications/`. Never commit them, and never
   copy personal details into tracked files (code, prompts, tests, README).
   `examples/` is a fictional stand-in; `python3 -m resume_agent init` copies it.
 - Never edit `templates/resume_base.tex` or anything in `profile/` while tailoring a

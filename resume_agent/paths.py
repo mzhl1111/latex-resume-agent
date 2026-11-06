@@ -20,6 +20,8 @@ PROFILE_DIR = _env_path("RESUME_PROFILE_DIR", REPO_ROOT / "profile")
 TEMPLATES_DIR = _env_path("RESUME_TEMPLATES_DIR", REPO_ROOT / "templates")
 # Where per-role workspaces are written.
 JOBS_DIR = _env_path("RESUME_JOBS_DIR", REPO_ROOT / "jobs")
+# Where submitted-application records are kept (one folder per application).
+APPLICATIONS_DIR = _env_path("RESUME_APPLICATIONS_DIR", REPO_ROOT / "applications")
 
 WORK_HISTORY = PROFILE_DIR / "work_history.md"
 GUARDRAILS = PROFILE_DIR / "guardrails.json"

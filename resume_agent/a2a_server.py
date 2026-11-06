@@ -64,7 +64,24 @@ def agent_card(base_url: str, *, auth: bool) -> dict:
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/pdf", "text/markdown"],
-            }
+            },
+            {
+                "id": "record_application",
+                "name": "Record a submitted application",
+                "description": "After you submit an application, send a data part with action=record_application, "
+                "job_url, slug (or resume_pdf_base64), cover_letter_text, questions=[{question, answer}], "
+                "confirmation_id, notes. Also: action=update_application (application_id, status, note), "
+                "list_applications (status, company, since), get_application (application_id).",
+                "tags": ["job-application", "tracking"],
+                "examples": [
+                    '{"action": "record_application", "job_url": "https://jobs.lever.co/acme/abc", "slug": "acme-ml", '
+                    '"questions": [{"question": "Why Acme?", "answer": "..."}]}',
+                    '{"action": "update_application", "application_id": "2026-11-06_acme_ml-engineer_3f9a2c", '
+                    '"status": "interview", "note": "Recruiter screen booked"}',
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
         ],
     }
     if auth:
@@ -110,6 +127,41 @@ def parse_request(message: dict) -> dict:
         else:
             args["jd_text"] = text
     return args
+
+
+APP_ACTIONS = {"record_application", "update_application", "list_applications", "get_application"}
+
+
+def find_action(message: dict) -> dict | None:
+    for part in message.get("parts", []):
+        if (part.get("kind") or part.get("type")) == "data" and isinstance(part.get("data"), dict):
+            if part["data"].get("action") in APP_ACTIONS:
+                return part["data"]
+    return None
+
+
+def run_app_action(data: dict) -> Any:
+    from . import applications as apps
+
+    d = {k: v for k, v in data.items() if k != "action"}
+    action = data["action"]
+    if action == "record_application":
+        import inspect
+
+        allowed = set(inspect.signature(apps.record_application).parameters)
+        res = apps.record_application(**{k: v for k, v in d.items() if k in allowed and k not in ("apps_dir", "jobs_dir")})
+        return {k: v for k, v in res.items() if k != "path"}
+    if action == "update_application":
+        app_id = d.pop("application_id", None)
+        if not app_id:
+            raise apps.ApplicationError("application_id is required")
+        keep = ("status", "note", "at", "by", "add_questions", "confirmation_id", "extra")
+        return apps.summary(apps.update_application(app_id, **{k: d[k] for k in keep if k in d}))
+    if action == "list_applications":
+        return apps.list_applications(**{k: d[k] for k in ("status", "company", "since") if k in d})
+    rec = apps.get_application(d.get("application_id", ""))
+    rec.pop("path", None)
+    return rec
 
 
 def _run_task(task: dict, args: dict, generate: Callable[..., Any]) -> None:
@@ -172,6 +224,25 @@ def make_handler(generate: Callable[..., Any] | None = None):
 
         if method == "message/send":
             message = params.get("message") or {}
+            action = find_action(message)
+            if action:
+                from .applications import ApplicationError
+
+                tid, cid = str(uuid.uuid4()), message.get("contextId") or str(uuid.uuid4())
+                try:
+                    import anyio
+
+                    result = await anyio.to_thread.run_sync(run_app_action, action)
+                    state, text = "completed", f"{action['action']} ok"
+                    artifacts = [{"artifactId": str(uuid.uuid4()), "name": f"{action['action']}.json",
+                                  "parts": [{"kind": "data", "data": {"result": result}}]}]
+                except (ApplicationError, TypeError) as exc:
+                    state, text, artifacts = "failed", str(exc), []
+                task = {"kind": "task", "id": tid, "contextId": cid, "artifacts": artifacts, "history": [message],
+                        "status": {"state": state, "message": _agent_message(text, tid, cid), "timestamp": _now()}}
+                with _lock:
+                    _tasks[tid] = task
+                return JSONResponse({"jsonrpc": "2.0", "id": id_, "result": task})
             args = parse_request(message)
             if not (args.get("jd_url") or args.get("jd_text")):
                 return _rpc_error(id_, -32602, "Send a job URL or JD text (text part) or a data part with jd_url/jd_text")

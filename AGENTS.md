@@ -64,5 +64,5 @@ For a role folder `jobs/<slug>/`:
 - `resume.pdf` — compiled resume
 - `resume.png` — rendered first-page preview
 
-`jobs/` and `outputs/` contents are gitignored because they contain personal data.
+`jobs/`, `outputs/` and `applications/` contents are gitignored because they contain personal data.
 Do not overwrite `templates/resume_base.tex` when customizing a role.

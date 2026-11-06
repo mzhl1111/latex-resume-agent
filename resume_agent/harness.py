@@ -156,6 +156,9 @@ def _write(ev: dict, role: str, ti: dict) -> dict | None:
         return deny("The verifier is read-only.")
     if REVIEW_FILE.search(path) or path.startswith("jobs/.harness"):
         return deny("Review records are written only by the harness (SubagentStop hook).")
+    if path.startswith("applications/"):
+        return deny("Application records are written through `python3 -m resume_agent app record|update` "
+                    "(or the MCP/A2A tools) so the index and hashes stay consistent.")
     if path.startswith("outputs/"):
         return deny("Deliver with `python3 -m resume_agent deliver <job> --name <file>.pdf`; it checks the review gate.")
     if WRITER_ONLY.search(path) and role != WRITER:
@@ -196,12 +199,14 @@ def _bash(ev: dict, role: str, ti: dict) -> dict | None:
             )
         return None
     if re.match(r"^\s*python3? -m resume_agent\b", cmd) and not SHELL_META.search(cmd.replace("2>&1", "")):
-        if role == WRITER and re.search(r"resume_agent\s+deliver\b", cmd):
-            return deny("Only the orchestrator delivers, after the verifier passes.")
+        if role == WRITER and re.search(r"resume_agent\s+(deliver|app)\b", cmd):
+            return deny("Only the orchestrator delivers or records applications.")
         return None
     if SHELL_WRITE.search(cmd):
         if re.search(r"review-|jobs/\.harness", cmd):
             return deny("Review records are written only by the harness.")
+        if re.search(r"\bapplications/", cmd):
+            return deny("Use `python3 -m resume_agent app ...` to change application records.")
         if re.search(r"\boutputs/", cmd):
             return deny("Deliver with `python3 -m resume_agent deliver <job> --name <file>.pdf`.")
         if role != WRITER and re.search(r"jobs/[^/\s]+/(resume\.tex|analysis\.md)", cmd):
