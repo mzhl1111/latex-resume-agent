@@ -14,6 +14,8 @@
     python -m resume_agent app show <id>
     python -m resume_agent dashboard [--port 8050] [--export F.html] [--traces D] [--applications D]
     python -m resume_agent demo-data [--out demo]      fictional traces + applications for the dashboard
+    python -m resume_agent generate <url|--text-file F> [--writer-backend B] [--verifier-backend B]
+    python -m resume_agent llm-check [--role writer|verifier]   which backend each role uses + a ping
     python -m resume_agent serve [--port 8080]         MCP + A2A HTTP server
 """
 
@@ -233,6 +235,19 @@ def main(argv: list[str] | None = None) -> int:
     dd.add_argument("--jobs", type=int, default=48)
     dd.add_argument("--seed", type=int, default=7)
 
+    gn = sub.add_parser("generate", help="run the server-side writer -> verifier pipeline locally")
+    gn.add_argument("url", nargs="?")
+    gn.add_argument("--text-file")
+    gn.add_argument("--slug")
+    gn.add_argument("--instructions", default="")
+    gn.add_argument("--writer-backend", choices=["anthropic-api", "claude-code", "codex"])
+    gn.add_argument("--verifier-backend", choices=["anthropic-api", "claude-code", "codex"])
+    gn.add_argument("--rounds", type=int, default=3)
+
+    lc = sub.add_parser("llm-check", help="show the LLM backend per role and send a tiny test prompt")
+    lc.add_argument("--role", choices=["writer", "verifier"], action="append")
+    lc.add_argument("--no-ping", action="store_true", help="only show the configuration")
+
     sv = sub.add_parser("serve")
     sv.add_argument("--host", default="0.0.0.0")
     sv.add_argument("--port", type=int, default=8080)
@@ -335,6 +350,46 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote {res['spans']} spans and {res['applications_count']} applications under {args.out}/ (fictional)")
         print(f"View: python3 -m resume_agent dashboard --traces {res['traces']} --applications {res['applications']}")
         return 0
+    if args.cmd == "generate":
+        import os
+
+        from .llm_pipeline import PipelineError, generate_resume
+
+        if args.writer_backend:
+            os.environ["RESUME_WRITER_BACKEND"] = args.writer_backend
+        if args.verifier_backend:
+            os.environ["RESUME_VERIFIER_BACKEND"] = args.verifier_backend
+        if not (args.url or args.text_file):
+            p.error("generate needs a URL or --text-file")
+        try:
+            res = generate_resume(jd_url=args.url, jd_text=Path(args.text_file).read_text() if args.text_file else None,
+                                  slug=args.slug, instructions=args.instructions, max_rounds=args.rounds,
+                                  progress=lambda m: print(f"  {m}", file=sys.stderr))
+        except (PipelineError, FetchError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps({k: v for k, v in res.to_dict().items() if k != "review"}, indent=2))
+        return 0 if res.ok else 1
+    if args.cmd == "llm-check":
+        from .llm_backends import BackendError, Message, describe, get_backend, role_model
+
+        info = describe()
+        rc = 0
+        for role in args.role or ["writer", "verifier"]:
+            d = info[role]
+            line = f"{role:<9} backend={d.get('backend')} model={d.get('model') or '(default)'} ready={d.get('ready')}"
+            if args.no_ping or not d.get("ready"):
+                print(line + ("" if d.get("ready") else f"  {d.get('error', '')}"))
+                rc |= 0 if d.get("ready") else 1
+                continue
+            try:
+                r = get_backend(role).complete(system="Reply with exactly one word.", model=role_model(role),
+                                               messages=[Message("user", "Say PONG")], max_tokens=20)
+                print(line + f"  ping ok ({r.text.strip()[:20]!r}, {r.input_tokens}+{r.output_tokens} tokens)")
+            except BackendError as exc:
+                print(line + f"  ping FAILED: {exc}")
+                rc = 1
+        return rc
     if args.cmd == "serve":
         from .server import run
 
