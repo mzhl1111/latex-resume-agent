@@ -375,6 +375,27 @@ def get_application(application_id: str) -> t.CallToolResult:
     return t.CallToolResult(content=[t.TextContent(type="text", text=json.dumps(rec, indent=2))], structured_content=rec)
 
 
+@mcp.tool(
+    description="Open a file from a recorded application: resume.pdf (the exact PDF submitted), "
+    "cover_letter.*, jd.md (posting snapshot), answers.md, or attachments/<name>. Text files come back as text; "
+    "others as an embedded base64 resource. Omit filename to list the files."
+)
+def get_application_file(application_id: str, filename: str | None = None) -> t.CallToolResult:
+    try:
+        if not filename:
+            files = applications.list_files(application_id)
+            return t.CallToolResult(content=[t.TextContent(type="text", text="\n".join(f["name"] for f in files))],
+                                    structured_content={"application_id": application_id, "files": files})
+        data, mime = applications.read_file(application_id, filename)
+    except applications.ApplicationError as exc:
+        return _app_error(exc)
+    if mime.startswith("text/"):
+        return t.CallToolResult(content=[t.TextContent(type="text", text=data.decode("utf-8", "replace"))])
+    return t.CallToolResult(content=[t.EmbeddedResource(type="resource", resource=t.BlobResourceContents(
+        uri=f"resume://applications/{application_id}/{filename}", mime_type=mime,
+        blob=base64.b64encode(data).decode()))])
+
+
 @mcp.prompt(description="Step-by-step loop for an agent tailoring the resume itself with this server's tools.")
 def tailor_resume(job_url: str) -> str:
     return f"""Tailor the resume for {job_url}.

@@ -212,3 +212,45 @@ def test_harness_routes_application_writes_through_the_cli(tmp_path, monkeypatch
     assert deny(harness.handle(ev("Bash", {"command": "rm -rf applications/x"})))
     assert harness.handle(ev("Bash", {"command": "python3 -m resume_agent app list"})) is None
     assert deny(harness.handle(ev("Bash", {"command": "python3 -m resume_agent app record --url u --slug s"}, harness.WRITER)))
+
+
+@needs_tex
+def test_read_file_everywhere(job, tmp_path, capsys):
+    app_id = apps.record_application(job_url=URL, slug="acme-search", questions=QA, cover_letter_text="Dear Acme")["id"]
+    names = {f["name"] for f in apps.list_files(app_id)}
+    assert {"resume.pdf", "answers.md", "cover_letter.md", "jd.md"} <= names and "application.json" not in names
+    data, mime = apps.read_file(app_id, "resume.pdf")
+    assert data.startswith(b"%PDF") and mime == "application/pdf"
+    for bad in ("../x", "application.json", "/etc/passwd", "attachments/../../x.pdf"):
+        with pytest.raises(apps.ApplicationError):
+            apps.read_file(app_id, bad)
+    # CLI
+    assert cli.main(["app", "file", app_id, "cover_letter.md"]) == 0 and "Dear Acme" in capsys.readouterr().out
+    assert cli.main(["app", "file", app_id, "resume.pdf"]) == 2  # binary needs --out
+    assert cli.main(["app", "file", app_id, "resume.pdf", "--out", str(tmp_path / "r.pdf")]) == 0
+    assert (tmp_path / "r.pdf").read_bytes() == data
+    # A2A
+    client = TestClient(create_app(token="", generate=lambda **kw: None))
+    body = {"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {"message": {"role": "user", "messageId": "m",
+            "parts": [{"kind": "data", "data": {"action": "get_application_file", "application_id": app_id, "filename": "resume.pdf"}}]}}}
+    part = client.post("/a2a", json=body).json()["result"]["artifacts"][0]["parts"][0]
+    assert part["kind"] == "file" and base64.b64decode(part["file"]["bytes"]) == data
+
+
+@needs_tex
+@pytest.mark.anyio
+async def test_mcp_get_application_file(job):
+    from mcp.client import Client
+
+    from resume_agent.mcp_server import mcp
+
+    app_id = apps.record_application(job_url=URL, slug="acme-search", questions=QA)["id"]
+    async with Client(mcp) as c:
+        listing = await c.call_tool("get_application_file", {"application_id": app_id})
+        assert "resume.pdf" in listing.content[0].text
+        md = await c.call_tool("get_application_file", {"application_id": app_id, "filename": "answers.md"})
+        assert "Why do you want to work at Acme?" in md.content[0].text
+        pdf = await c.call_tool("get_application_file", {"application_id": app_id, "filename": "resume.pdf"})
+        assert pdf.content[0].resource.mime_type == "application/pdf"
+        bad = await c.call_tool("get_application_file", {"application_id": app_id, "filename": "../../etc/passwd"})
+        assert bad.is_error

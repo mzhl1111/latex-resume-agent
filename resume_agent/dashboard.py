@@ -10,7 +10,10 @@ exported file keeps working offline.
 
 from __future__ import annotations
 
+import hmac
 import json
+import re
+import secrets
 import threading
 import webbrowser
 from datetime import datetime, timezone
@@ -19,9 +22,13 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, paths
+from . import applications as apps_mod
 
 TEMPLATE = Path(__file__).with_name("dashboard.html")
 MAX_SPANS = 100_000
+SERVABLE = {".pdf": "application/pdf", ".md": "text/plain; charset=utf-8", ".txt": "text/plain; charset=utf-8",
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+MAX_BODY = 64 * 1024
 SPAN_ATTRS = {
     "job", "company", "role", "source", "chars", "ok", "pages", "errors", "warnings", "checks", "fill_ratio",
     "verdict", "must_fix", "round", "rounds", "model", "input_tokens", "output_tokens", "tool", "decision",
@@ -86,14 +93,24 @@ def load_applications(apps_dir: Path) -> list[dict]:
                 "cover": bool(r.get("cover_letter")),
                 "qa": len(r.get("questions") or []),
                 "by": r.get("submitted_by", ""),
-                "events": [{"t": e.get("at", ""), "s": e.get("status", "")} for e in r.get("events") or []],
+                "location": (r.get("job") or {}).get("location", ""),
+                "confirmation_id": r.get("confirmation_id", ""),
+                "notes": r.get("notes", ""),
+                "verification_reason": ((r.get("resume") or {}).get("verification") or {}).get("reason", ""),
+                "matches_generated": (r.get("resume") or {}).get("matches_generated"),
+                "cover_file": (r.get("cover_letter") or {}).get("file"),
+                "questions": [{"q": q.get("question", ""), "a": q.get("answer", "")} for q in r.get("questions") or []],
+                "files": sorted(p.name for p in f.iterdir() if p.is_file() and p.suffix.lower() in SERVABLE),
+                "events": [{"t": e.get("at", ""), "s": e.get("status", ""), "note": e.get("note", ""), "by": e.get("by", "")}
+                           for e in r.get("events") or []],
             }
         )
     rows.sort(key=lambda a: a["t"])
     return rows
 
 
-def build_payload(traces_dir: Path | None = None, apps_dir: Path | None = None, *, title: str | None = None) -> dict:
+def build_payload(traces_dir: Path | None = None, apps_dir: Path | None = None, *, title: str | None = None,
+                  editable: bool = False, token: str = "") -> dict:
     traces_dir = traces_dir or paths.TRACES_DIR
     apps_dir = apps_dir or paths.APPLICATIONS_DIR
     return {
@@ -103,6 +120,10 @@ def build_payload(traces_dir: Path | None = None, apps_dir: Path | None = None, 
         "sources": {"traces": str(traces_dir), "applications": str(apps_dir)},
         "spans": load_spans(traces_dir),
         "applications": load_applications(apps_dir),
+        "statuses": list(apps_mod.STATUSES),
+        # Editing only works against the local server; an exported HTML file is read-only.
+        "editable": editable,
+        "token": token,
     }
 
 
@@ -118,30 +139,102 @@ def export(out: Path, traces_dir: Path | None = None, apps_dir: Path | None = No
 
 
 def serve(host: str = "127.0.0.1", port: int = 8050, traces_dir: Path | None = None, apps_dir: Path | None = None,
-          *, open_browser: bool = False) -> None:
+          *, open_browser: bool = False, allow_hosts: list[str] | None = None, read_only: bool = False) -> None:
+    """Serve the dashboard. Unless read_only, it can update application status/notes through
+    ``applications.update_application`` (same code path as the CLI, MCP and A2A)."""
+    token = secrets.token_urlsafe(24)
+    apps_root = (apps_dir or paths.APPLICATIONS_DIR)
+    allowed = {"127.0.0.1", "localhost", "[::1]"} | set(allow_hosts or [])
+
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            if self.path.split("?")[0] not in ("/", "/index.html", "/data.json"):
-                self.send_error(404)
-                return
-            payload = build_payload(traces_dir, apps_dir)
-            if self.path.startswith("/data.json"):
-                body, ctype = json.dumps(payload).encode(), "application/json"
-            else:
-                body, ctype = render(payload).encode(), "text/html; charset=utf-8"
-            self.send_response(200)
+        def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
+            self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; "
+                             "style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _json(self, code: int, obj: Any) -> None:
+            self._send(code, json.dumps(obj).encode(), "application/json")
+
+        def _host_ok(self) -> bool:
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+            return host in allowed
+
+        def do_GET(self):  # noqa: N802
+            if not self._host_ok():
+                return self._json(403, {"error": "unexpected Host header"})
+            path = self.path.split("?")[0]
+            if path in ("/", "/index.html", "/data.json"):
+                payload = build_payload(traces_dir, apps_dir, editable=not read_only, token=token)
+                if path == "/data.json":
+                    return self._json(200, payload)
+                return self._send(200, render(payload).encode(), "text/html; charset=utf-8")
+            m = re.fullmatch(r"/files/([A-Za-z0-9][A-Za-z0-9._-]*)/((?:attachments/)?[A-Za-z0-9][A-Za-z0-9._-]*)", path)
+            if m:
+                try:
+                    data, mime = apps_mod.read_file(m.group(1), m.group(2), apps_dir=apps_dir)
+                except apps_mod.ApplicationError:
+                    return self._json(404, {"error": "not found"})
+                if mime not in SERVABLE.values() and not mime.startswith("text/markdown"):
+                    # only types a browser can show safely; others download
+                    return self._send(200, data, "application/octet-stream",
+                                      {"Content-Disposition": f'attachment; filename="{Path(m.group(2)).name}"'})
+                ctype = "text/plain; charset=utf-8" if mime.startswith("text/") else mime
+                return self._send(200, data, ctype, {"Content-Disposition": f'inline; filename="{Path(m.group(2)).name}"'})
+            return self._json(404, {"error": "not found"})
+
+        def do_POST(self):  # noqa: N802
+            # CSRF: localhost Host, same-origin (if the browser sends Origin), per-process token, JSON body.
+            if read_only:
+                return self._json(403, {"error": "dashboard is read-only"})
+            if not self._host_ok():
+                return self._json(403, {"error": "unexpected Host header"})
+            origin = self.headers.get("Origin")
+            if origin and origin != f"http://{self.headers.get('Host')}":
+                return self._json(403, {"error": "cross-origin request refused"})
+            if not hmac.compare_digest(self.headers.get("X-Dashboard-Token", ""), token):
+                return self._json(403, {"error": "missing or bad dashboard token (reload the page)"})
+            if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                return self._json(415, {"error": "JSON body required"})
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > MAX_BODY:
+                return self._json(413, {"error": "body too large"})
+            m = re.fullmatch(r"/api/applications/([A-Za-z0-9][A-Za-z0-9._-]*)/update", self.path.split("?")[0])
+            if not m:
+                return self._json(404, {"error": "not found"})
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("body must be an object")
+                qa = body.get("add_question")
+                rec = apps_mod.update_application(
+                    m.group(1),
+                    status=body.get("status") or None,
+                    note=(body.get("note") or "").strip() or None,
+                    at=body.get("at") or None,
+                    by="dashboard",
+                    confirmation_id=(body.get("confirmation_id") or "").strip() or None,
+                    add_questions=[qa] if isinstance(qa, dict) and str(qa.get("question", "")).strip() else None,
+                    apps_dir=apps_dir,
+                )
+            except (apps_mod.ApplicationError, ValueError) as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(200, {"ok": True, "summary": apps_mod.summary(rec)})
 
         def log_message(self, *args: Any) -> None:
             pass
 
     httpd = ThreadingHTTPServer((host, port), Handler)
-    url = f"http://{host}:{port}/"
-    print(f"Dashboard at {url}  (traces: {traces_dir or paths.TRACES_DIR}, applications: {apps_dir or paths.APPLICATIONS_DIR})")
+    url = f"http://{'localhost' if host in ('0.0.0.0', '127.0.0.1') else host}:{httpd.server_address[1]}/"
+    print(f"Dashboard at {url}  (traces: {traces_dir or paths.TRACES_DIR}, applications: {apps_root})"
+          + ("  [read-only]" if read_only else ""))
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:

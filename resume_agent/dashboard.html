@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Resume agent dashboard</title>
+<link rel="icon" href="data:,">
 <style>
 .viz-root {
   color-scheme: light;
@@ -105,6 +106,59 @@ tbody tr.sel { background: var(--hover); }
 .empty { color: var(--text-muted); font-size: 13px; padding: 24px 0; text-align: center; }
 .scroll { max-height: 360px; overflow: auto; }
 a { color: inherit; }
+/* application detail panel */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.28); z-index: 20; display: none; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); z-index: 21; display: none;
+  background: var(--surface-1); border-left: 1px solid var(--border); box-shadow: -8px 0 32px rgba(0,0,0,0.16);
+  overflow-y: auto; padding: 22px 24px 40px;
+}
+.drawer.open, .scrim.open { display: block; }
+.drawer h2 { font-size: 18px; margin: 0 0 2px; }
+.drawer h3 { font-size: 13px; font-weight: 600; margin: 22px 0 8px; color: var(--text-secondary); }
+.drawer .x { float: right; font-size: 20px; line-height: 1; padding: 4px 8px; }
+.meta { display: grid; grid-template-columns: 140px 1fr; gap: 6px 12px; font-size: 13px; margin-top: 14px; }
+.meta dt { color: var(--text-muted); }
+.meta dd { margin: 0; }
+.files { display: flex; gap: 8px; flex-wrap: wrap; }
+.files a { font-size: 13px; text-decoration: none; padding: 5px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.files a:hover { background: var(--hover); }
+.status-pick { display: flex; flex-wrap: wrap; gap: 6px; }
+.status-pick button {
+  font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-secondary); cursor: pointer; display: inline-flex; gap: 6px; align-items: center;
+}
+.status-pick button:hover { background: var(--hover); }
+.status-pick button[aria-pressed="true"] { color: var(--text-primary); border-color: var(--text-secondary); font-weight: 600; }
+.status-pick button.current { box-shadow: inset 0 0 0 1px var(--axis); }
+.form { display: grid; gap: 10px; margin-top: 12px; }
+.form label { font-size: 12px; color: var(--text-muted); display: grid; gap: 4px; }
+.form input, .form textarea {
+  font: inherit; font-size: 13px; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--page); color: var(--text-primary);
+}
+.form textarea { min-height: 64px; resize: vertical; }
+.row { display: flex; gap: 10px; align-items: center; }
+.primary {
+  font: inherit; font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 8px; border: 0; cursor: pointer;
+  background: var(--text-primary); color: var(--surface-1);
+}
+.primary:disabled { opacity: 0.5; cursor: default; }
+.msg { font-size: 12px; }
+.msg.err { color: var(--critical); }
+.msg.ok { color: var(--delta-good); }
+.timeline { list-style: none; padding: 0; margin: 0; border-left: 1px solid var(--grid); margin-left: 4px; }
+.timeline li { position: relative; padding: 0 0 12px 16px; font-size: 13px; }
+.timeline li .dot { position: absolute; left: -5px; top: 5px; box-shadow: 0 0 0 2px var(--surface-1); }
+.timeline .when { color: var(--text-muted); font-size: 12px; }
+.qa dt { font-weight: 600; font-size: 13px; margin-top: 10px; }
+.qa dd { margin: 3px 0 0; color: var(--text-secondary); font-size: 13px; white-space: pre-wrap; }
+details summary { cursor: pointer; font-size: 12px; color: var(--text-muted); }
+.chip { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; padding: 2px 4px 2px 10px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-secondary); margin-left: 8px; }
+.chip button { border: 0; background: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 0 6px; }
+.readonly { font-size: 12px; color: var(--text-muted); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; margin-top: 12px; }
+.clickbar { cursor: pointer; }
 @media (max-width: 1100px) {
   .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .row2, .row3 { grid-template-columns: 1fr; }
@@ -163,13 +217,15 @@ a { color: inherit; }
   <section class="grid row1">
     <div class="card" id="c-apps"></div>
   </section>
+  <div id="tip" role="tooltip"></div>
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title"></aside>
 </div>
-<div id="tip" role="tooltip"></div>
 
 <script>
-const DATA = /*__DATA__*/null || { spans: [], applications: [], title: "Resume agent", sources: {} };
+let DATA = /*__DATA__*/null || { spans: [], applications: [], title: "Resume agent", sources: {}, statuses: [] };
 const DAY = 86400000;
-const state = { days: 90, mode: "", job: null };
+const state = { days: 90, mode: "", job: null, stage: null, openApp: null };
 const css = (v) => getComputedStyle(document.getElementById("root")).getPropertyValue(v).trim();
 
 // ---------------------------------------------------------------- helpers
@@ -253,7 +309,7 @@ function latestTime() {
   for (const a of DATA.applications) m = Math.max(m, ts(a.t) || 0);
   return m || Date.now();
 }
-const NOW = latestTime();
+let NOW = latestTime();
 function inRange(t) { return !state.days || ts(t) >= NOW - state.days * DAY; }
 function filtered() {
   const spans = DATA.spans.filter((s) => inRange(s.t) && (!state.mode || s.m === state.mode));
@@ -384,7 +440,7 @@ function lineChart(keys, series, weekly) {
 }
 
 // ---------------------------------------------------------------- horizontal bars
-function hbars(rows, { color, fmtv = fmt, sub, cardId, labelW = 130 } = {}) {
+function hbars(rows, { color, fmtv = fmt, sub, cardId, labelW = 130, onClick } = {}) {
   if (!rows.length) return empty("No data in this range");
   const W = width(document.getElementById(cardId)) - 36, rowH = 30, barH = 14, L = labelW, R = 64;
   const H = rows.length * rowH + 4, iw = W - L - R;
@@ -395,7 +451,9 @@ function hbars(rows, { color, fmtv = fmt, sub, cardId, labelW = 130 } = {}) {
     const yy = i * rowH + (rowH - barH) / 2, w = Math.max(r.value > 0 ? 3 : 0, (r.value / max) * iw);
     svg.append(el("text", { x: L - 10, y: yy + barH - 2, "text-anchor": "end", class: "lbl", text: r.label }));
     const g = el("g", {});
-    const hitR = el("rect", { x: 0, y: i * rowH, width: W, height: rowH, class: "hit", tabindex: 0 });
+    const hitR = el("rect", { x: 0, y: i * rowH, width: W, height: rowH, class: "hit" + (onClick ? " clickbar" : ""), tabindex: 0,
+      role: onClick ? "button" : null, "aria-label": onClick ? `${r.label}: ${fmtv(r.value)}` : null });
+    if (onClick) { hitR.addEventListener("click", () => onClick(r)); hitR.addEventListener("keydown", (e) => { if (e.key === "Enter") onClick(r); }); }
     // 4px rounded data-end, square at the baseline
     const rr = Math.min(4, w / 2);
     const mark = el("path", { class: "mark", fill: r.color || color, d: `M${L},${yy} H${L + w - rr} Q${L + w},${yy} ${L + w},${yy + rr} V${yy + barH - rr} Q${L + w},${yy + barH} ${L + w - rr},${yy + barH} H${L} Z` });
@@ -411,8 +469,9 @@ function hbars(rows, { color, fmtv = fmt, sub, cardId, labelW = 130 } = {}) {
 function renderFunnel(m) {
   const rows = STAGES.map(([label, test]) => ({ label, value: m.apps.filter((a) => test(new Set(a.events.map((e) => e.s)))).length }));
   const base = rows[0].value || 1;
-  card("c-funnel", "Application funnel", "Applications that reached each stage", {
-    chart: () => hbars(rows, { color: css("--series-1"), cardId: "c-funnel", labelW: 110, sub: (r) => `${pct(r.value / base)} of submitted` }),
+  card("c-funnel", "Application funnel", "Applications that reached each stage · click a stage to list them", {
+    chart: () => hbars(rows, { color: css("--series-1"), cardId: "c-funnel", labelW: 110, sub: (r) => `${pct(r.value / base)} of submitted · click to list`,
+      onClick: (r) => { state.stage = r.label === "Submitted" ? null : r.label; renderApps(compute(filtered())); document.getElementById("c-apps").scrollIntoView({ behavior: "smooth", block: "start" }); } }),
     table: () => simpleTable([{ label: "Stage", get: (r) => r.label }, { label: "Applications", num: true, get: (r) => r.value }, { label: "Of submitted", num: true, get: (r) => pct(r.value / base) }], rows),
   });
 }
@@ -600,26 +659,174 @@ function renderTrace(m) {
 }
 const STATUS_COLOR = { offer: "--good", accepted: "--good", interview: "--series-1", screen: "--series-1", assessment: "--series-1", acknowledged: "--seq-light", rejected: "--critical", ghosted: "--text-muted", withdrawn: "--text-muted", submitted: "--axis" };
 function renderApps(m) {
-  const body = card("c-apps", "Applications", `${m.apps.length} submitted in this range · records live in applications/`);
-  if (!m.apps.length) { body.append(empty("No applications in this range")); return; }
+  const stageTest = state.stage ? (STAGES.find(([l]) => l === state.stage) || [null, () => true])[1] : null;
+  const list = stageTest ? m.apps.filter((a) => stageTest(new Set(a.events.map((e) => e.s)))) : m.apps;
+  const body = card("c-apps", "Applications", `${list.length} of ${m.apps.length} in this range · click a row to open it` +
+    (DATA.editable ? " and update its status" : ""));
+  if (state.stage) {
+    const chip = el("span", { class: "chip" }, `Reached: ${state.stage}`, el("button", { type: "button", "aria-label": "Clear stage filter", text: "×",
+      onclick: () => { state.stage = null; renderApps(m); } }));
+    document.querySelector("#c-apps .desc").append(chip);
+  }
+  if (!list.length) { body.append(empty("No applications match")); return; }
   const t = el("table", {});
-  t.append(el("thead", {}, el("tr", {}, ...["Submitted", "Company", "Role", "Status", "Platform", "Resume verified", "Q&A", "Cover letter", "Submitted by"].map((h, i) => el("th", { class: i === 6 ? "num" : null, text: h })))));
+  t.append(el("thead", {}, el("tr", {}, ...["Submitted", "Company", "Role", "Status", "Last update", "Platform", "Resume verified", "Q&A", "Submitted by"].map((h, i) => el("th", { class: i === 7 ? "num" : null, text: h })))));
   const tb = el("tbody", {});
-  for (const a of [...m.apps].reverse().slice(0, 60)) {
-    tb.append(el("tr", {},
+  for (const a of [...list].reverse().slice(0, 200)) {
+    const last = a.events[a.events.length - 1];
+    const tr = el("tr", { class: "clickable", tabindex: 0, "aria-label": `Open ${a.company} ${a.role}` },
       el("td", { text: new Date(a.t).toLocaleDateString(undefined, { month: "short", day: "numeric" }) }),
       el("td", { text: a.company }),
-      el("td", {}, a.url ? el("a", { href: a.url, target: "_blank", rel: "noopener noreferrer", text: a.role || "posting" }) : a.role),
-      el("td", {}, el("span", { class: "badge" }, el("span", { class: "dot", style: `background:${css(STATUS_COLOR[a.status] || "--axis")}` }), a.status)),
+      el("td", { text: a.role || "posting" }),
+      el("td", {}, statusBadge(a.status)),
+      el("td", { class: "muted", text: last ? relTime(last.t) : "" }),
       el("td", { class: "muted", text: a.platform }),
       el("td", { text: a.verified === true ? "✓ yes" : a.verified === false ? "! no" : "–" }),
       el("td", { class: "num", text: a.qa }),
-      el("td", { text: a.cover ? "Yes" : "No" }),
       el("td", { class: "muted", text: a.by }),
-    ));
+    );
+    tr.addEventListener("click", () => openApp(a.id));
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter") openApp(a.id); });
+    tb.append(tr);
   }
   t.append(tb);
   body.append(el("div", { class: "scroll" }, t));
+}
+function statusBadge(s) {
+  return el("span", { class: "badge" }, el("span", { class: "dot", style: `background:${css(STATUS_COLOR[s] || "--axis")}` }), s);
+}
+function relTime(t) {
+  const d = (Date.now() - ts(t)) / DAY;
+  return d < 1 ? "today" : d < 2 ? "yesterday" : d < 60 ? `${Math.floor(d)} days ago` : new Date(t).toLocaleDateString();
+}
+const fmtDate = (t) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" });
+const FILE_LABEL = { "resume.pdf": "Submitted resume (PDF)", "jd.md": "Job posting snapshot", "answers.md": "Q&A", "resume.tex": "Resume source" };
+const NEXT = { submitted: ["acknowledged", "screen", "rejected", "ghosted", "withdrawn"], acknowledged: ["screen", "assessment", "rejected", "ghosted"],
+  screen: ["assessment", "interview", "rejected"], assessment: ["interview", "rejected"], interview: ["offer", "rejected", "withdrawn"],
+  offer: ["accepted", "withdrawn"], accepted: [], rejected: [], withdrawn: [], ghosted: ["acknowledged", "screen", "rejected"] };
+
+// ---------------------------------------------------------------- application detail panel
+const drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
+let lastFocus = null;
+function closeApp() { drawer.classList.remove("open"); scrim.classList.remove("open"); state.openApp = null; if (lastFocus) lastFocus.focus(); }
+scrim.addEventListener("click", closeApp);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drawer.classList.contains("open")) closeApp(); });
+
+function openApp(id, flash) {
+  const a = DATA.applications.find((x) => x.id === id);
+  if (!a) return closeApp();
+  if (!drawer.classList.contains("open")) lastFocus = document.activeElement;
+  state.openApp = id;
+  const close = el("button", { class: "ghost x", type: "button", "aria-label": "Close", text: "×", onclick: closeApp });
+  const head = el("div", {}, close,
+    el("h2", { id: "d-title", text: a.company || "Application" }),
+    el("div", { class: "sub" }, a.url ? el("a", { href: a.url, target: "_blank", rel: "noopener noreferrer", text: a.role || "Job posting" }) : (a.role || "")),
+    el("div", { style: "margin-top:8px" }, statusBadge(a.status)));
+  const meta = el("dl", { class: "meta" });
+  const add = (k, v) => { if (v !== undefined && v !== null && v !== "") meta.append(el("dt", { text: k }), el("dd", {}, v)); };
+  add("Submitted", fmtDate(a.t));
+  add("Submitted by", a.by);
+  add("Platform", a.platform);
+  add("Location", a.location);
+  add("Confirmation", a.confirmation_id);
+  add("Resume verified", a.verified === true ? "✓ yes" : a.verified === false ? `! no — ${a.verification_reason || "not verifier-approved"}` : "unknown");
+  if (a.matches_generated === false) add("Resume file", "! differs from the generated resume");
+  add("Notes", a.notes);
+  add("ID", el("code", { text: a.id }));
+
+  const parts = [head, meta];
+
+  // files
+  const files = (a.files || []).filter((f) => !f.startsWith("."));
+  if (files.length) {
+    parts.push(el("h3", { text: "Files" }));
+    if (DATA.editable) parts.push(el("div", { class: "files" }, ...files.map((f) =>
+      el("a", { href: `/files/${encodeURIComponent(a.id)}/${encodeURIComponent(f)}`, target: "_blank", rel: "noopener", text: FILE_LABEL[f] || (f.startsWith("cover_letter") ? "Cover letter" : f) }))));
+    else parts.push(el("div", { class: "muted", style: "font-size:13px", text: files.join(" · ") + " — in applications/" + a.id + "/" }));
+  }
+
+  // update form
+  parts.push(el("h3", { text: "Update" }));
+  if (DATA.editable) parts.push(updateForm(a, flash));
+  else parts.push(el("div", { class: "readonly", text: "This is a read-only export. Run `python3 -m resume_agent dashboard`, or use `app update`, MCP update_application or A2A, to change the status." }));
+
+  // timeline
+  parts.push(el("h3", { text: `Timeline (${a.events.length})` }));
+  const tl = el("ol", { class: "timeline" });
+  for (const e of [...a.events].reverse()) {
+    tl.append(el("li", {}, el("span", { class: "dot", style: `background:${css(STATUS_COLOR[e.s] || "--axis")}` }),
+      el("div", {}, el("b", { text: e.s }), el("span", { class: "when", text: "  " + fmtDate(e.t) + (e.by ? " · " + e.by : "") })),
+      e.note ? el("div", { class: "muted", text: e.note }) : null));
+  }
+  parts.push(tl);
+
+  // Q&A
+  parts.push(el("h3", { text: `Application questions (${(a.questions || []).length})` }));
+  if (!(a.questions || []).length) parts.push(el("div", { class: "muted", style: "font-size:13px", text: "None recorded." }));
+  else { const dl = el("dl", { class: "qa" }); for (const q of a.questions) dl.append(el("dt", { text: q.q }), el("dd", { text: q.a || "(blank)" })); parts.push(dl); }
+
+  drawer.replaceChildren(...parts);
+  drawer.classList.add("open"); scrim.classList.add("open");
+  close.focus();
+}
+
+function localInput(d) { const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; }
+function updateForm(a, flash) {
+  let picked = null;
+  const suggested = new Set(NEXT[a.status] || []);
+  const pick = el("div", { class: "status-pick", role: "group", "aria-label": "New status" });
+  const statuses = (DATA.statuses && DATA.statuses.length ? DATA.statuses : Object.keys(NEXT)).filter((s) => s !== "submitted");
+  const ordered = [...statuses.filter((s) => suggested.has(s)), ...statuses.filter((s) => !suggested.has(s) && s !== a.status)];
+  for (const s of ordered) {
+    const b = el("button", { type: "button", "aria-pressed": "false", title: suggested.has(s) ? "Likely next step" : "" },
+      el("span", { class: "dot", style: `background:${css(STATUS_COLOR[s] || "--axis")}` }), s);
+    if (!suggested.has(s)) b.style.opacity = "0.7";
+    b.addEventListener("click", () => {
+      picked = picked === s ? null : s;
+      [...pick.children].forEach((x) => x.setAttribute("aria-pressed", String(x === b && picked === s)));
+      sync();
+    });
+    pick.append(b);
+  }
+  const when = el("input", { type: "datetime-local", value: localInput(new Date()) });
+  const note = el("textarea", { placeholder: "e.g. Recruiter call booked for Tue; asked about relocation" });
+  const conf = el("input", { type: "text", value: "", placeholder: a.confirmation_id || "optional" });
+  const q = el("input", { type: "text", placeholder: "Question asked later (optional)" });
+  const qa = el("textarea", { placeholder: "Your answer" });
+  const save = el("button", { class: "primary", type: "submit", text: "Save", disabled: true });
+  const msg = el("span", { class: "msg" + (flash ? " ok" : ""), role: "status", text: flash || "" });
+  const sync = () => { save.disabled = !(picked || note.value.trim() || conf.value.trim() || q.value.trim()); save.textContent = picked ? `Save as ${picked}` : "Save"; };
+  [note, conf, q].forEach((x) => x.addEventListener("input", sync));
+  const form = el("form", { class: "form" },
+    el("label", {}, "Change status (suggested next steps first)", pick),
+    el("div", { class: "row" }, el("label", { style: "flex:1" }, "When", when), el("label", { style: "flex:1" }, "Confirmation #", conf)),
+    el("label", {}, "Note", note),
+    el("details", {}, el("summary", { text: "Add a question & answer (e.g. from a follow-up form)" }), el("div", { class: "form" }, q, qa)),
+    el("div", { class: "row" }, save, msg));
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    save.disabled = true; msg.className = "msg"; msg.textContent = "Saving…";
+    const body = { status: picked, note: note.value, at: when.value ? new Date(when.value).toISOString() : null, confirmation_id: conf.value,
+      add_question: q.value.trim() ? { question: q.value, answer: qa.value } : null };
+    try {
+      const r = await fetch(`/api/applications/${encodeURIComponent(a.id)}/update`, { method: "POST",
+        headers: { "Content-Type": "application/json", "X-Dashboard-Token": DATA.token }, body: JSON.stringify(body) });
+      const out = await r.json();
+      if (!r.ok) throw new Error(out.error || r.statusText);
+      await refresh();
+      openApp(a.id, picked ? `Saved — status is now ${picked}` : "Saved");
+    } catch (err) {
+      msg.className = "msg err"; msg.textContent = String(err.message || err); save.disabled = false;
+    }
+  });
+  return form;
+}
+async function refresh() {
+  const r = await fetch("/data.json", { cache: "no-store" });
+  if (!r.ok) throw new Error("Saved, but reloading data failed; refresh the page");
+  DATA = await r.json();
+  NOW = latestTime();
+  renderAll();
 }
 
 // ---------------------------------------------------------------- wiring

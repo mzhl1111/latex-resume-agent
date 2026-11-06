@@ -492,3 +492,31 @@ def list_applications(
         cutoff = datetime.fromisoformat(_parse_time(since))
         rows = [r for r in rows if datetime.fromisoformat(r["submitted_at"]) >= cutoff]
     return rows
+
+
+READABLE = {".pdf": "application/pdf", ".md": "text/markdown", ".txt": "text/plain", ".docx":
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".doc": "application/msword",
+            ".rtf": "application/rtf", ".html": "text/html", ".png": "image/png", ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg"}
+
+
+def list_files(app_id: str, *, apps_dir: Path | None = None) -> list[dict]:
+    folder = _folder(app_id, apps_dir)
+    return [
+        {"name": str(p.relative_to(folder)), "bytes": p.stat().st_size, "mime": READABLE[p.suffix.lower()]}
+        for p in sorted(folder.rglob("*"))
+        if p.is_file() and p.suffix.lower() in READABLE
+    ]
+
+
+def read_file(app_id: str, name: str, *, apps_dir: Path | None = None) -> tuple[bytes, str]:
+    """Bytes + MIME type of one file in an application folder (e.g. resume.pdf, cover_letter.md,
+    jd.md, answers.md, attachments/portfolio.pdf). Refuses anything outside the folder."""
+    folder = _folder(app_id, apps_dir).resolve()
+    if not re.fullmatch(r"(attachments/)?[A-Za-z0-9][A-Za-z0-9._-]*", name or ""):
+        raise ApplicationError(f"Invalid file name: {name!r}")
+    target = (folder / name).resolve()
+    mime = READABLE.get(target.suffix.lower())
+    if not mime or folder not in target.parents or not target.is_file():
+        raise ApplicationError(f"No file {name!r} in {app_id}")
+    return target.read_bytes(), mime

@@ -152,7 +152,7 @@ All endpoints except health and the agent card require `Authorization: Bearer $R
 | `write_resume(slug, resume_tex, analysis_md?)` | Saves, compiles and proofreads; returns the report and the rendered page image. |
 | `verify_resume(slug)` | Independent verifier in a fresh model call that sees only facts, rules, JD, PDF text and page image (never your analysis). Needs `ANTHROPIC_API_KEY`. |
 | `proofread_resume(slug)` / `get_resume_pdf(slug)` / `list_jobs()` / `fetch_job_description(url)` | Helpers. |
-| `record_application(...)` / `update_application` / `list_applications` / `get_application` | Track submitted applications (see below). |
+| `record_application(...)` / `update_application` / `list_applications` / `get_application` / `get_application_file` | Track submitted applications (see below). |
 
 There are two ways a calling agent can use the server:
 - **The caller does the writing (no server key needed).** Use the `tailor_resume` prompt:
@@ -270,6 +270,31 @@ What it shows:
 - **Recent tailoring runs:** click one to see a per-run trace waterfall.
 - **Harness enforcement:** denials by role and reason.
 - **Applications table.**
+
+**Working with applications.** Clicking a row in the applications table, or a stage in the funnel,
+opens a detail panel. It shows the job link, submission time, confirmation number, whether the
+resume was verified, the full timeline and every application question with the answer given. It
+also links to the exact PDF submitted, the cover letter and the posting snapshot. From the panel you
+can **change the status**, with suggested next steps first and an editable timestamp. You can also
+add a note, set the confirmation number, or add a question and answer from a follow-up form.
+
+![Application detail panel (fictional demo data)](docs/dashboard-application.png)
+
+Saving calls the same `applications.update_application` that the CLI, MCP and A2A use, so the
+timeline, `index.md` and traces stay consistent no matter where an update comes from. The local
+server only accepts edits from its own page:
+- it checks the Host header is localhost (against DNS rebinding);
+- it rejects cross-origin requests;
+- each request needs a per-process token and a JSON body.
+
+It only serves files from inside an application folder. Use `--read-only` to turn editing off.
+Exported HTML is always read-only.
+
+| Action | Dashboard | CLI | MCP | A2A (`data.action`) |
+|---|---|---|---|---|
+| Change status, note, confirmation #, add Q&A | detail panel | `app update <id> --status ... --note ...` | `update_application` | `update_application` |
+| Open a record | click a row | `app show <id>` | `get_application` | `get_application` |
+| Open its files (PDF, cover letter, posting, Q&A) | links in the panel | `app file <id> [name] [--out f]` | `get_application_file` | `get_application_file` |
 
 Filters for date range and run mode scope everything on the page. Each chart has a table view and a
 hover tooltip, and the page follows your OS light/dark setting (with a toggle). It has no

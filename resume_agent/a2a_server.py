@@ -71,8 +71,9 @@ def agent_card(base_url: str, *, auth: bool) -> dict:
                 "name": "Record a submitted application",
                 "description": "After you submit an application, send a data part with action=record_application, "
                 "job_url, slug (or resume_pdf_base64), cover_letter_text, questions=[{question, answer}], "
-                "confirmation_id, notes. Also: action=update_application (application_id, status, note), "
-                "list_applications (status, company, since), get_application (application_id).",
+                "confirmation_id, notes. Also: action=update_application (application_id, status, note, at, "
+                "confirmation_id, add_questions), list_applications (status, company, since), get_application "
+                "(application_id), get_application_file (application_id, filename; omit filename to list).",
                 "tags": ["job-application", "tracking"],
                 "examples": [
                     '{"action": "record_application", "job_url": "https://jobs.lever.co/acme/abc", "slug": "acme-ml", '
@@ -130,7 +131,8 @@ def parse_request(message: dict) -> dict:
     return args
 
 
-APP_ACTIONS = {"record_application", "update_application", "list_applications", "get_application"}
+APP_ACTIONS = {"record_application", "update_application", "list_applications", "get_application",
+               "get_application_file"}
 
 
 def find_action(message: dict) -> dict | None:
@@ -158,6 +160,12 @@ def run_app_action(data: dict) -> Any:
             raise apps.ApplicationError("application_id is required")
         keep = ("status", "note", "at", "by", "add_questions", "confirmation_id", "extra")
         return apps.summary(apps.update_application(app_id, **{k: d[k] for k in keep if k in d}))
+    if action == "get_application_file":
+        app_id, name = d.get("application_id", ""), d.get("filename")
+        if not name:
+            return {"files": apps.list_files(app_id)}
+        data, mime = apps.read_file(app_id, name)
+        return {"__file__": {"name": name.split("/")[-1], "mimeType": mime, "bytes": base64.b64encode(data).decode()}}
     if action == "list_applications":
         return apps.list_applications(**{k: d[k] for k in ("status", "company", "since") if k in d})
     rec = apps.get_application(d.get("application_id", ""))
@@ -251,8 +259,13 @@ def make_handler(generate: Callable[..., Any] | None = None):
 
                     result = await anyio.to_thread.run_sync(run_app_action, action)
                     state, text = "completed", f"{action['action']} ok"
-                    artifacts = [{"artifactId": str(uuid.uuid4()), "name": f"{action['action']}.json",
-                                  "parts": [{"kind": "data", "data": {"result": result}}]}]
+                    if isinstance(result, dict) and "__file__" in result:
+                        f = result["__file__"]
+                        artifacts = [{"artifactId": str(uuid.uuid4()), "name": f["name"],
+                                      "parts": [{"kind": "file", "file": f}]}]
+                    else:
+                        artifacts = [{"artifactId": str(uuid.uuid4()), "name": f"{action['action']}.json",
+                                      "parts": [{"kind": "data", "data": {"result": result}}]}]
                 except (ApplicationError, TypeError) as exc:
                     state, text, artifacts = "failed", str(exc), []
                 task = {"kind": "task", "id": tid, "contextId": cid, "artifacts": artifacts, "history": [message],

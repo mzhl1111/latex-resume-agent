@@ -34,6 +34,7 @@ services:
     ports:
       - "127.0.0.1:8050:8050"
     volumes:
-      - ./applications:/data/applications:ro
+      # read-write: the dashboard can update application status / notes
+      - ./applications:/data/applications
       - ./traces:/data/traces:ro
     profiles: ["dashboard"]
