@@ -45,7 +45,9 @@ can be checked mechanically into code (`resume_agent/proofread.py`, `profile/gua
 AGENTS.md                          Generic rules (shared by Codex, Claude Code, the server)
 CLAUDE.md                          Claude Code entry; imports AGENTS.md
 .claude/commands/resume.md         /resume slash command (full workflow)
-.claude/agents/resume-proofreader.md  Independent reviewer subagent (also the server's review prompt)
+.claude/agents/resume-writer.md    Writer subagent
+.claude/agents/resume-proofreader.md  Verifier subagent (also the server's verifier prompt)
+.claude/hooks/resume_harness.py    Hook shim → resume_agent/harness.py (role enforcement)
 .claude/settings.json              Tool permissions; profile/ and templates/ are edit-denied
 examples/                          Fictional profile + template (tests use these)
 profile/            (gitignored)   work_history.md, rules.md, guardrails.json: your private data
@@ -55,6 +57,8 @@ resume_agent/                      Shared Python core
   compile.py                         pdflatex + 1-page check + PNG + log parsing
   proofread.py                       layout / fact / guardrail / hygiene checks
   workspace.py                       jobs/<slug>/ folders
+  harness.py                         Claude Code hook policy (writer/verifier separation)
+  gate.py                            harness-stamped review records + delivery gate
   llm_pipeline.py                    server-side writer → proofread → reviewer loop (Anthropic API)
   mcp_server.py, a2a_server.py, server.py   MCP + A2A over one HTTP app
 scripts/                           Original shell helpers (still work)
@@ -76,15 +80,36 @@ claude
 > /resume https://job-boards.greenhouse.io/acme/jobs/1234567
 ```
 
-The command:
-1. `python3 -m resume_agent start <url>` fetches the JD into `jobs/<slug>/jd.md`. If the page needs
-   JavaScript, it falls back to WebFetch, and then to asking you to paste the JD.
-2. Writes `analysis.md` (positioning, requirements → evidence, gaps, edit plan).
-3. Edits `resume.tex` (body only).
-4. Loops `python3 -m resume_agent proofread` until there are no errors, then looks at `resume.png` itself.
-5. Runs the `resume-proofreader` subagent. It starts with fresh context and checks the rendered page and
-   every claim against the fact bank. MUST FIX items are applied, for at most 3 rounds.
-6. Copies the PDF to `outputs/` (file name set in `profile/rules.md`) and summarises the tailoring choices.
+The command runs a small multi-agent pipeline. The writer and the verifier never share a context:
+
+| Role | Who | Can | Cannot |
+|---|---|---|---|
+| Orchestrator | the main Claude Code thread | fetch the JD, launch subagents, read `status`, `deliver` | edit `resume.tex` / `analysis.md`, write reviews, copy into `outputs/` directly |
+| Writer | `resume-writer` subagent | write `analysis.md` + `resume.tex`, run the mechanical proofread | touch `profile/` / `templates/`, write reviews, deliver |
+| Verifier | `resume-proofreader` subagent, **new instance each round** | read the fact bank, rules, JD, PDF, PNG, tex; run `proofread` / `pdftotext` | see `analysis.md`, earlier reviews or harness state; write anything; be messaged again |
+
+Flow: `start` → writer (first pass) → fresh verifier → if NEEDS CHANGES, writer revises from `review-N.md`
+→ fresh verifier … (max 3 rounds) → `deliver`.
+
+### Enforced by the harness, not just the prompts
+`.claude/settings.json` registers hooks that run `.claude/hooks/resume_harness.py`, a thin shim over
+`resume_agent/harness.py`. The hook input's `agent_type` identifies the role.
+- **PreToolUse:**
+  - role-based write locks on `resume.tex`, `analysis.md`, `review-*.md` and `outputs/`;
+  - the verifier is read-only, with a Bash allowlist and no access to writer notes;
+  - the verifier's launch prompt is rewritten to just `Job folder: jobs/<slug>/`, so the orchestrator
+    can't pass summaries or a suggested verdict, and any `resume` of an earlier agent is stripped;
+  - `SendMessage` to an old verifier is blocked.
+- **SubagentStart:** maps each subagent to its job, and tells the verifier it is fresh.
+- **SubagentStop:** the hook, not an agent, saves the verifier's final reply as `review-N.md`, stamped
+  with the verdict and the SHA-256 of `resume.tex`. A reply without a `VERDICT:` line is sent back once.
+- **Delivery gate:** `python3 -m resume_agent deliver` copies to `outputs/` only if the latest
+  harness-stamped review is a PASS for the *current* `resume.tex`. Any edit after the PASS, or a
+  hand-written review file, blocks it. After 3 rounds, `--accept-open-issues` lets you ship anyway.
+
+Edit/Write rules are exact. Bash rules are pattern-based (best effort). If the policy code itself
+crashes, calls inside the resume subagents are blocked (fail closed) and the main thread is left alone.
+Check the hooks are loaded with `/hooks` after opening the repo (hooks load when a session starts).
 
 The CLI is also usable by hand:
 
@@ -92,6 +117,8 @@ The CLI is also usable by hand:
 python3 -m resume_agent start <url> [--slug acme-ml]       # or: start --text-file jd.txt --slug acme-ml
 python3 -m resume_agent proofread jobs/acme-ml/resume.tex   # writes proofread.md; exit 1 on errors
 python3 -m resume_agent check jobs/acme-ml/resume.tex       # compile + 1 page + PNG only
+python3 -m resume_agent status jobs/acme-ml                 # review rounds + delivery gate
+python3 -m resume_agent deliver jobs/acme-ml --name Jane_Doe_Acme_MLE.pdf
 ```
 
 ## Mode 2: MCP / A2A server
@@ -118,12 +145,13 @@ All endpoints except health and the agent card require `Authorization: Bearer $R
 | `start_job(jd_url \| jd_text, slug?)` | Fetches the JD and creates a workspace. |
 | `get_resume_context(slug?)` | Returns the rules, fact bank, template, guardrails, reviewer checklist, and the job's JD/tex. |
 | `write_resume(slug, resume_tex, analysis_md?)` | Saves, compiles and proofreads; returns the report and the rendered page image. |
+| `verify_resume(slug)` | Independent verifier in a fresh model call that sees only facts, rules, JD, PDF text and page image (never your analysis). Needs `ANTHROPIC_API_KEY`. |
 | `proofread_resume(slug)` / `get_resume_pdf(slug)` / `list_jobs()` / `fetch_job_description(url)` | Helpers. |
 
 There are two ways a calling agent can use the server:
 - **The caller does the writing (no server key needed).** Use the `tailor_resume` prompt:
-  `start_job` → `get_resume_context` → `write_resume` (repeat) → `get_resume_pdf`. The caller's own
-  model does the tailoring, and the server keeps it honest with the proofreader.
+  `start_job` → `get_resume_context` → `write_resume` (repeat) → `verify_resume` → `get_resume_pdf`.
+  The caller's model writes, and a separate verifier signs off rather than the writer itself.
 - **The server does the writing.** Call `generate_resume`. It runs writer → mechanical proofread →
   independent reviewer (the same prompt as the Claude Code subagent, given the rendered PNG) → fix,
   for up to 3 rounds. Models are set by `RESUME_WRITER_MODEL` / `RESUME_REVIEWER_MODEL`.

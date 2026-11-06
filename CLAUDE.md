@@ -7,9 +7,12 @@ Claude Code share one copy:
 @AGENTS.md
 
 ## Claude Code workflow
-- Run `/resume <job-url>` (or `/resume` followed by pasted JD text) for the full
-  flow: fetch JD → analysis → tailored `resume.tex` → compile → mechanical
-  proofread → independent `resume-proofreader` subagent review → final PDF.
+- Run `/resume <job-url>` (or `/resume` followed by pasted JD text). The main
+  thread only orchestrates: `resume-writer` writes, a fresh `resume-proofreader`
+  verifies each round, and `python3 -m resume_agent deliver` ships the PDF.
+- Writer/verifier separation is enforced by hooks (`.claude/hooks/resume_harness.py`
+  → `resume_agent/harness.py`). If a hook denies a call, follow its message rather
+  than working around it. Never write `review-*.md` or into `outputs/` directly.
 - Shared tooling is the `resume_agent` Python package. Use the CLI rather than
   re-implementing steps:
   - `python3 -m resume_agent start <url> [--slug S]` — fetch JD, create `jobs/<slug>/`

@@ -4,8 +4,8 @@
       "Bash(python3 -m resume_agent:*)",
       "Bash(python3 -m pytest:*)",
       "Bash(bash scripts/check_resume.sh:*)",
-      "Bash(mkdir -p outputs)",
-      "Bash(cp jobs/*)",
+      "Bash(pdftotext:*)",
+      "Bash(pdfinfo:*)",
       "Read(./**)",
       "Edit(./jobs/**)",
       "Write(./jobs/**)",
@@ -14,6 +14,44 @@
     "deny": [
       "Edit(./profile/**)",
       "Edit(./templates/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Task|Agent|SendMessage|Read|Grep|Glob|Edit|MultiEdit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/resume_harness.py\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "resume-writer|resume-proofreader",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/resume_harness.py\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "resume-writer|resume-proofreader",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/resume_harness.py\"",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

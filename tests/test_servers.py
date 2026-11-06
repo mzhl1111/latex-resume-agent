@@ -113,16 +113,18 @@ class FakeClient:
 
     def __init__(self):
         self.calls = []
+        self.verifier_calls = []
         base = paths.BASE_TEMPLATE.read_text()
         self.drafts = [base.replace(r"\textasciitilde60\%", r"\textasciitilde65\%"), base]
         self.messages = types.SimpleNamespace(create=self.create)
 
     def create(self, *, model, max_tokens, system, messages):
         self.calls.append(list(messages))
-        if "independent resume proofreader" in system:
+        if "independent resume verifier" in system:
+            self.verifier_calls.append(messages)
             text = "VERDICT: PASS\n\nMUST FIX\n- none\n\nCONSIDER\n- none"
         else:
-            text = f"<analysis>\n# Analysis\n</analysis>\n<resume_tex>\n{self.drafts.pop(0)}\n</resume_tex>"
+            text = f"<analysis>\n# Analysis WRITER-SECRET-REASONING\n</analysis>\n<resume_tex>\n{self.drafts.pop(0)}\n</resume_tex>"
         return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text=text)])
 
 
@@ -133,6 +135,11 @@ def test_pipeline_fixes_invented_metric_then_passes_review():
     assert res.ok and res.verdict == "PASS", res.log
     assert len(fake.calls) == 3  # draft, fix after proofread, review
     assert "65%" in json.dumps(fake.calls[1][-1])  # proofread report was fed back
+    # The verifier ran in a fresh single-message conversation with no writer context.
+    (v_msgs,) = fake.verifier_calls
+    assert len(v_msgs) == 1 and "WRITER-SECRET-REASONING" not in json.dumps(v_msgs)
+    assert any(b.get("type") == "image" for b in v_msgs[0]["content"])
+    assert (paths.JOBS_DIR / "acme-llm" / "review-1.md").exists()
 
 
 def test_review_parsing():
