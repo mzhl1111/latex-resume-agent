@@ -1,18 +1,15 @@
-"""End-to-end generation with the Anthropic API (server mode only).
-
-Claude Code mode does NOT use this: there, Claude itself is the writer and the
-``resume-proofreader`` subagent is the reviewer, on the user's plan tokens.
-A deployed server can't use plan tokens, so ``generate_resume`` uses an
-``ANTHROPIC_API_KEY`` and mirrors the same loop:
+"""Server-side generation: the same writer -> verifier loop as the Claude Code mode.
 
     fetch JD -> writer drafts analysis + tex -> mechanical proofread -> fix
-    -> independent visual reviewer (same prompt as the subagent) -> fix -> ...
+    -> independent verifier (fresh call, same prompt as the subagent, sees the PNG) -> fix -> ...
+
+Model calls go through LiteLLM (``resume_agent.llm``), so the writer and verifier can use the
+Anthropic API or OpenRouter (any vendor), chosen per role with RESUME_WRITER_MODEL /
+RESUME_VERIFIER_MODEL. Claude Code mode does not use this: there, Claude itself is the writer.
 """
 
 from __future__ import annotations
 
-import base64
-import os
 import re
 import subprocess
 from dataclasses import asdict, dataclass, field
@@ -20,12 +17,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import gate, paths, tracing
+from .llm import LLMError, LLMResult, complete, model_for, provider_of
 from .jd_fetch import fetch_jd, slugify
 from .proofread import proofread
 from .workspace import JobWorkspace, new_job
 
-DEFAULT_WRITER_MODEL = os.environ.get("RESUME_WRITER_MODEL", "claude-sonnet-5-5")
-DEFAULT_REVIEWER_MODEL = os.environ.get("RESUME_REVIEWER_MODEL", "claude-sonnet-5-5")
 REVIEWER_PROMPT = paths.REPO_ROOT / ".claude" / "agents" / "resume-proofreader.md"
 
 WRITER_SYSTEM = """You tailor a one-page LaTeX resume to a job description.
@@ -61,33 +57,22 @@ class GenerationResult:
         return asdict(self)
 
 
-def _client():
-    try:
-        import anthropic
-    except ImportError as exc:  # pragma: no cover
-        raise PipelineError("Install the 'anthropic' package to use generate_resume") from exc
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise PipelineError(
-            "ANTHROPIC_API_KEY is not set. Either set it on the server, or call the low-level tools "
-            "(start_job, get_resume_context, write_resume, proofread_resume) and do the writing yourself."
-        )
-    return anthropic.Anthropic()
-
-
-def _llm(client: Any, *, role: str, job: str, **kwargs: Any) -> Any:
-    """One model call, traced with token usage."""
-    with tracing.span("llm.call", role=role, model=kwargs.get("model"), job=job) as s:
-        resp = client.messages.create(**kwargs)
-        usage = getattr(resp, "usage", None)
-        if usage is not None:
-            s.set(input_tokens=getattr(usage, "input_tokens", 0) or 0,
-                  output_tokens=getattr(usage, "output_tokens", 0) or 0)
-        s.set(stop_reason=getattr(resp, "stop_reason", None))
-        return resp
-
-
-def _text(resp: Any) -> str:
-    return "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
+def _llm(*, role: str, job: str, model: str, system: str, messages: list[dict], images: list[Path] = (),
+         max_tokens: int = 8000, completion: Callable[..., Any] | None = None) -> LLMResult:
+    """One model call via LiteLLM, traced with provider, model, tokens and cost."""
+    with tracing.span("llm.call", role=role, model=model, provider=provider_of(model), job=job) as s:
+        try:
+            res = complete(system=system, messages=messages, model=model, images=list(images), max_tokens=max_tokens,
+                           completion=completion)
+        except LLMError as exc:
+            s.set_error(exc)
+            raise PipelineError(
+                f"{role} call failed: {exc}. Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY for the configured model "
+                "(RESUME_WRITER_MODEL / RESUME_VERIFIER_MODEL), or use the caller-driven tools "
+                "(start_job, get_resume_context, write_resume, proofread_resume) and do the writing yourself."
+            ) from exc
+        s.set(model=res.model, input_tokens=res.input_tokens, output_tokens=res.output_tokens, cost_usd=res.cost_usd)
+        return res
 
 
 def _tag(text: str, tag: str) -> str | None:
@@ -124,9 +109,9 @@ def _generate_resume(
     slug: str | None = None,
     instructions: str = "",
     max_rounds: int = 3,
-    writer_model: str = DEFAULT_WRITER_MODEL,
-    reviewer_model: str = DEFAULT_REVIEWER_MODEL,
-    client: Any = None,
+    writer_model: str | None = None,
+    reviewer_model: str | None = None,
+    completion: Callable[..., Any] | None = None,
     jobs_dir: Path | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> GenerationResult:
@@ -143,7 +128,9 @@ def _generate_resume(
         paths.require_profile()
     except paths.ProfileMissing as exc:
         raise PipelineError(str(exc)) from exc
-    client = client or _client()
+    writer_model = writer_model or model_for("writer")
+    reviewer_model = reviewer_model or model_for("verifier")
+    note(f"Writer: {writer_model}; verifier: {reviewer_model}")
 
     # 1. JD + workspace
     if jd_url and not jd_text:
@@ -169,9 +156,8 @@ def _generate_resume(
     messages: list[dict] = [{"role": "user", "content": context}]
 
     def write_round() -> None:
-        resp = _llm(client, role="writer", job=ws.slug, model=writer_model, max_tokens=8000, system=system,
-                    messages=messages)
-        out = _text(resp)
+        out = _llm(role="writer", job=ws.slug, model=writer_model, system=system, messages=messages,
+                   completion=completion).text
         messages.append({"role": "assistant", "content": out})
         tex = _tag(out, "resume_tex")
         if not tex or "\\documentclass" not in tex:
@@ -211,7 +197,7 @@ def _generate_resume(
             break
 
         # 3. independent verifier: a fresh conversation built only from artifacts
-        v = verify_resume(ws, client=client, model=reviewer_model, round_no=rounds)
+        v = verify_resume(ws, model=reviewer_model, round_no=rounds, completion=completion)
         review = v.review
         remaining, verdict = v.must_fix, v.verdict
         note(f"Round {rounds}: verifier verdict {verdict} ({len(remaining)} must-fix)")
@@ -242,8 +228,8 @@ class Verification:
     review_path: str
 
 
-def verifier_inputs(ws: JobWorkspace) -> list[dict]:
-    """The verifier's entire world: source facts, rules, JD, and the produced artifacts.
+def verifier_inputs(ws: JobWorkspace) -> tuple[str, list[Path]]:
+    """The verifier's entire world: source facts, rules, JD, and the produced artifacts (+ the page image).
 
     Deliberately excludes analysis.md, earlier reviews and the writer conversation, so the
     verifier judges the resume the way a recruiter and a fact-checker would.
@@ -251,7 +237,6 @@ def verifier_inputs(ws: JobWorkspace) -> list[dict]:
     pdf_text = subprocess.run(
         ["pdftotext", "-layout", str(ws.pdf), "-"], capture_output=True, text=True, check=True
     ).stdout
-    png_b64 = base64.standard_b64encode(ws.png.read_bytes()).decode()
     blocks = [
         ("work_history", paths.WORK_HISTORY.read_text()),
         ("agents_md", paths.AGENT_INSTRUCTIONS.read_text()),
@@ -261,50 +246,37 @@ def verifier_inputs(ws: JobWorkspace) -> list[dict]:
         ("resume_pdf_text", pdf_text),
         ("resume_tex", ws.tex.read_text()),
     ]
-    content: list[dict] = [{"type": "text", "text": f"<{k}>\n{v}\n</{k}>"} for k, v in blocks]
-    content += [
-        {"type": "text", "text": "Rendered page (resume.png):"},
-        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png_b64}},
-        {
-            "type": "text",
-            "text": "Verify it now. The files are inlined above and the mechanical proofread was just "
-            "re-run for you; you cannot run tools.",
-        },
-    ]
-    return content
+    text = "\n\n".join(f"<{k}>\n{v}\n</{k}>" for k, v in blocks)
+    text += ("\n\nThe rendered page (resume.png) is attached. Verify it now. The files are inlined above and "
+             "the mechanical proofread was just re-run for you; you cannot run tools.")
+    return text, [ws.png]
 
 
 def verify_resume(
     ws: JobWorkspace,
     *,
-    client: Any = None,
-    model: str = DEFAULT_REVIEWER_MODEL,
+    model: str | None = None,
     round_no: int | None = None,
+    completion: Callable[..., Any] | None = None,
 ) -> Verification:
     """Run one independent verification in a brand-new conversation."""
-    with tracing.span("resume.verify", job=ws.slug, model=model, source="server") as s:
-        v = _verify(ws, client=client, model=model)
+    model = model or model_for("verifier")
+    with tracing.span("resume.verify", job=ws.slug, model=model, provider=provider_of(model), source="server") as s:
+        v = _verify(ws, model=model, completion=completion)
         s.set(verdict=v.verdict, must_fix=len(v.must_fix))
         return v
 
 
-def _verify(ws: JobWorkspace, *, client: Any, model: str) -> Verification:
-    client = client or _client()
+def _verify(ws: JobWorkspace, *, model: str, completion: Callable[..., Any] | None) -> Verification:
     rep = proofread(ws.tex)  # fresh compile + report; never trust an old one
     ws.proofread.write_text(rep.to_markdown())
     if not ws.pdf.exists() or not ws.png.exists():
         issues = [f"{i.check}: {i.message}" for i in rep.issues if i.severity == "error"]
         return Verification("FAILED MECHANICAL CHECKS", issues, rep.to_markdown(), "")
-    resp = _llm(
-        client,
-        role="verifier",
-        job=ws.slug,
-        model=model,
-        max_tokens=2000,
-        system=_strip_frontmatter(REVIEWER_PROMPT.read_text()),
-        messages=[{"role": "user", "content": verifier_inputs(ws)}],
-    )
-    review = _text(resp)
+    text, images = verifier_inputs(ws)
+    review = _llm(role="verifier", job=ws.slug, model=model, max_tokens=2000,
+                  system=_strip_frontmatter(REVIEWER_PROMPT.read_text()),
+                  messages=[{"role": "user", "content": text}], images=images, completion=completion).text
     path = gate.record_review(ws.dir, review, source=f"server verifier ({model})")
     must_fix = _review_issues(review)
     if not rep.ok:

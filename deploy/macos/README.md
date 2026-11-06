@@ -37,11 +37,13 @@ git clone https://github.com/mzhl1111/latex-resume-agent && cd latex-resume-agen
 # put your private data in place (see the top-level README): profile/ and templates/
 
 deploy/macos/resumectl install          # brew deps, TeX packages (asks for sudo once), .venv, .env + token, launchd plists
-$EDITOR deploy/macos/.env               # set TUNNEL_HOSTNAME=resume.<your-domain>; optionally ANTHROPIC_API_KEY
+$EDITOR deploy/macos/.env               # set TUNNEL_HOSTNAME=resume.<your-domain>; optionally a model key
+                                        # (ANTHROPIC_API_KEY or OPENROUTER_API_KEY) + RESUME_*_MODEL
 deploy/macos/resumectl tunnel-setup     # browser login to Cloudflare, creates the tunnel + DNS record, renders config
 deploy/macos/resumectl start            # server + tunnel + local dashboard, now and at every login
 deploy/macos/resumectl doctor           # checks tools, data, secrets, public health, 401 without token, dashboard NOT public
 deploy/macos/resumectl token            # bearer token + MCP client snippet for your agents
+deploy/macos/resumectl llm-check        # tiny test call to the writer/verifier models (if keys are set)
 ```
 
 You'll see `https://resume.<your-domain>/healthz` return `{"ok": true, ...}`, and

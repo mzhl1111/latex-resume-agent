@@ -9,8 +9,8 @@ Implements the parts of the A2A spec other agents need to delegate a resume:
 ``{"jd_url", "jd_text", "slug", "instructions"}``. With
 ``configuration.blocking: false`` it returns a ``working`` task immediately; poll
 ``tasks/get``. The completed task carries the PDF as a ``file`` artifact.
-Server-side generation needs ANTHROPIC_API_KEY (A2A callers send natural
-language, so the server must do the LLM work).
+Server-side generation needs a model key on the server (ANTHROPIC_API_KEY or OPENROUTER_API_KEY,
+via LiteLLM) because A2A callers send natural language.
 """
 
 from __future__ import annotations

@@ -8,6 +8,7 @@
 #   deploy/macos/resumectl doctor         check everything, including that the dashboard is NOT public
 #   deploy/macos/resumectl logs [server|tunnel|dashboard]
 #   deploy/macos/resumectl token          print the bearer token + an MCP client snippet
+#   deploy/macos/resumectl llm-check      tiny test call to the writer/verifier models
 #   deploy/macos/resumectl uninstall      remove the launchd agents (keeps your data and tunnel)
 set -euo pipefail
 
@@ -204,7 +205,9 @@ cmd_doctor() {
   [[ ${#tok} -ge 32 ]] && ok "RESUME_AGENT_TOKEN set" || { bad "RESUME_AGENT_TOKEN missing/short"; fail=1; }
   [[ "$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || stat -c '%a' "$ENV_FILE")" == 600 ]] && ok ".env is chmod 600" || warn "chmod 600 $ENV_FILE"
   git -C "$REPO" check-ignore -q "$ENV_FILE" && ok ".env is gitignored" || { bad ".env is NOT gitignored"; fail=1; }
-  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && ok "ANTHROPIC_API_KEY set (generate/verify enabled)" || warn "no ANTHROPIC_API_KEY: callers must use the caller-driven tools"
+  bold "models (generate_resume / verify_resume via LiteLLM)"
+  (cd "$REPO" && .venv/bin/python -m resume_agent llm-check --no-ping) | sed 's/^/  /' \
+    || warn "a model key is missing (ANTHROPIC_API_KEY / OPENROUTER_API_KEY): callers must use the caller-driven tools"
   bold "tunnel"
   if [[ -n "${TUNNEL_TOKEN:-}" ]]; then ok "dashboard-managed tunnel (TUNNEL_TOKEN)"
   elif [[ -f "$TUNNEL_CONFIG" ]]; then ok "$TUNNEL_CONFIG"; else bad "no tunnel config (resumectl tunnel-setup)"; fail=1; fi
@@ -266,6 +269,7 @@ case "${1:-}" in
   logs) shift; cmd_logs "${1:-server}" ;;
   token) cmd_token ;;
   uninstall) cmd_uninstall ;;
+  llm-check) load_env; cd "$REPO" && exec .venv/bin/python -m resume_agent llm-check ;;
   render) shift; cmd_render "${1:-}" ;;
-  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 64 ;;
+  *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 64 ;;
 esac

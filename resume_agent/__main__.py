@@ -14,6 +14,7 @@
     python -m resume_agent app show <id>
     python -m resume_agent dashboard [--port 8050] [--export F.html] [--traces D] [--applications D]
     python -m resume_agent demo-data [--out demo]      fictional traces + applications for the dashboard
+    python -m resume_agent llm-check [--no-ping]       model + key per role (LiteLLM), with a tiny test call
     python -m resume_agent serve [--port 8080]         MCP + A2A HTTP server
 """
 
@@ -233,6 +234,9 @@ def main(argv: list[str] | None = None) -> int:
     dd.add_argument("--jobs", type=int, default=48)
     dd.add_argument("--seed", type=int, default=7)
 
+    lc = sub.add_parser("llm-check", help="show the model/provider per role and send a tiny test prompt")
+    lc.add_argument("--no-ping", action="store_true")
+
     sv = sub.add_parser("serve")
     sv.add_argument("--host", default="0.0.0.0")
     sv.add_argument("--port", type=int, default=8080)
@@ -335,6 +339,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote {res['spans']} spans and {res['applications_count']} applications under {args.out}/ (fictional)")
         print(f"View: python3 -m resume_agent dashboard --traces {res['traces']} --applications {res['applications']}")
         return 0
+    if args.cmd == "llm-check":
+        from .llm import LLMError, complete, describe
+
+        rc = 0
+        for role, d in describe().items():
+            line = f"{role:<9} {d['model']}  key {d['key_env'] or '(LiteLLM default)'}: {'set' if d['ready'] else 'MISSING'}"
+            if args.no_ping or not d["ready"]:
+                print(line)
+                rc |= 0 if d["ready"] else 1
+                continue
+            try:
+                r = complete(system="Reply with exactly one word.", messages=[{"role": "user", "content": "Say PONG"}],
+                             model=d["model"], max_tokens=16)
+                cost = f", ${r.cost_usd:.5f}" if r.cost_usd is not None else ""
+                print(f"{line}  ping ok ({r.text.strip()[:16]!r}, {r.input_tokens}+{r.output_tokens} tokens{cost})")
+            except LLMError as exc:
+                print(f"{line}  ping FAILED: {exc}")
+                rc = 1
+        return rc
     if args.cmd == "serve":
         from .server import run
 

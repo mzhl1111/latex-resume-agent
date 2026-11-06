@@ -28,7 +28,7 @@ from .proofread import proofread
 from .workspace import get_job, new_job
 
 INSTRUCTIONS = """Tailors the server owner's one-page LaTeX resume to a job posting and proofreads the PDF.
-Fast path: call generate_resume with a job URL (needs the server's API key).
+Fast path: call generate_resume with a job URL (needs a model key on the server: Anthropic or OpenRouter).
 Do-it-yourself path (works without a server key): start_job -> get_resume_context ->
 write_resume (repeat until proofread passes and the page looks right) -> get_resume_pdf.
 Never invent facts: every claim and number must come from the work history returned by
@@ -198,7 +198,7 @@ def get_resume_pdf(slug: str) -> t.CallToolResult:
 @mcp.tool(
     description="Independent verification of a job's current resume by a separate model call that sees only "
     "the fact bank, rules, JD, PDF text and rendered page (never your reasoning or analysis). Use this instead "
-    "of reviewing your own draft. Requires ANTHROPIC_API_KEY on the server."
+    "of reviewing your own draft. Needs a model key on the server (ANTHROPIC_API_KEY or OPENROUTER_API_KEY)."
 )
 async def verify_resume(slug: str) -> t.CallToolResult:
     from .llm_pipeline import PipelineError
@@ -230,7 +230,7 @@ def list_jobs() -> list[dict[str, Any]]:
 
 @mcp.tool(
     description="Full pipeline on the server: fetch JD, tailor, compile, proofread, independent review, and "
-    "return the PDF. Requires ANTHROPIC_API_KEY on the server. Takes 1–4 minutes."
+    "return the PDF. Needs a model key on the server (ANTHROPIC_API_KEY or OPENROUTER_API_KEY). Takes 1–4 minutes."
 )
 async def generate_resume(
     jd_url: str | None = None,
