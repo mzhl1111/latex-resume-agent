@@ -37,12 +37,20 @@ git clone https://github.com/mzhl1111/latex-resume-agent && cd latex-resume-agen
 # put your private data in place (see the top-level README): profile/ and templates/
 
 deploy/macos/resumectl install          # brew deps, TeX packages (asks for sudo once), .venv, .env + token, launchd plists
-$EDITOR deploy/macos/.env               # set TUNNEL_HOSTNAME=resume.<your-domain>; optionally ANTHROPIC_API_KEY
+$EDITOR deploy/macos/.env               # set TUNNEL_HOSTNAME=resume.<your-domain>; pick RESUME_LLM_BACKEND (below)
 deploy/macos/resumectl tunnel-setup     # browser login to Cloudflare, creates the tunnel + DNS record, renders config
 deploy/macos/resumectl start            # server + tunnel + local dashboard, now and at every login
 deploy/macos/resumectl doctor           # checks tools, data, secrets, public health, 401 without token, dashboard NOT public
 deploy/macos/resumectl token            # bearer token + MCP client snippet for your agents
 ```
+
+**Using your Claude or ChatGPT plan for `generate_resume`.** Log in to the CLI once on this Mac:
+run `claude` and then `/login` (Claude Pro/Max), or `codex login` (ChatGPT). Then set
+`RESUME_LLM_BACKEND=claude-code` or `codex` in `.env` (or leave it empty to auto-detect), and run
+`resumectl llm-check` to send each role a tiny test prompt. Splitting vendors, e.g.
+`RESUME_WRITER_BACKEND=codex` with `RESUME_VERIFIER_BACKEND=claude-code`, gives you a cross-vendor
+verifier. The launchd service finds CLIs in `~/.local/bin` and `/opt/homebrew/bin`, and their logins
+(the Keychain, `~/.codex/`) work because the agents run in your user session.
 
 You'll see `https://resume.<your-domain>/healthz` return `{"ok": true, ...}`, and
 `http://localhost:8050` shows the dashboard on the Mac itself.

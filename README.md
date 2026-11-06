@@ -9,7 +9,7 @@ It runs two ways on one shared core:
 | Mode | Who does the LLM work | Entry point |
 |---|---|---|
 | **Claude Code** | Claude Code on your plan | `/resume <job-url>` |
-| **MCP / A2A server** | the calling agent, or the server with an `ANTHROPIC_API_KEY` | `docker compose up`, or [a Mac + Cloudflare Tunnel](deploy/macos/README.md) |
+| **MCP / A2A server** | the calling agent, or the server: your **Claude Pro/Max** plan (`claude` CLI), your **ChatGPT** plan (`codex` CLI), or an API key | `docker compose up`, or [a Mac + Cloudflare Tunnel](deploy/macos/README.md) |
 
 Codex still works too: `AGENTS.md` is the single copy of the rules, and `CLAUDE.md` imports it.
 
@@ -158,6 +158,42 @@ Two ways to host it: Docker (below), or natively on a Mac with a Cloudflare Tunn
 needs no open ports and only exposes the agent endpoints. That second option is
 [`deploy/macos/`](deploy/macos/README.md): `resumectl install`, `tunnel-setup`, `start`, `doctor`.
 
+### Who does the LLM work on the server
+`generate_resume`, `verify_resume` and A2A run the same writer → verifier loop as `/resume`. Each role
+runs on a pluggable backend:
+
+| `RESUME_LLM_BACKEND` | Uses | Billing |
+|---|---|---|
+| `claude-code` | the `claude` CLI in headless mode (`claude -p`), logged in on that machine | your **Claude Pro/Max** plan |
+| `codex` | the `codex` CLI (`codex exec`), logged in with ChatGPT | your **ChatGPT Plus/Pro** plan |
+| `anthropic-api` | the Anthropic API | `ANTHROPIC_API_KEY`, pay as you go |
+
+If unset, it picks the API when `ANTHROPIC_API_KEY` is set, else the `claude` CLI, else `codex`. You
+can choose per role, e.g. `RESUME_WRITER_BACKEND=codex RESUME_VERIFIER_BACKEND=claude-code`. With a
+different vendor checking the writer's work, the verifier is even more independent. Models are set
+with `RESUME_WRITER_MODEL` / `RESUME_VERIFIER_MODEL`; if unset, each backend uses its default.
+
+```bash
+claude            # once, then /login with your Claude plan     (or: codex login, with ChatGPT)
+python3 -m resume_agent llm-check                                # backend per role + a tiny test prompt
+python3 -m resume_agent generate <job-url> --writer-backend codex --verifier-backend claude-code
+```
+
+How the CLI backends behave:
+- **Isolated.** Every call runs in a fresh empty temp directory outside the repo, with no
+  settings, hooks, MCP servers or saved session. The writer has no tools. The verifier can only Read
+  a copy of the rendered page; everything else is inlined, and it never sees the writer's analysis.
+- **Your plan, not API billing.** `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `CODEX_API_KEY` are
+  removed from the CLI's environment, so a stray key can't silently switch a plan backend to API
+  billing.
+- **Your own use.** Plan-backed CLIs are meant for your own agents on your own machine. Keep
+  `RESUME_AGENT_TOKEN` set so nobody else spends your plan. For a shared or hosted deployment, use
+  `anthropic-api`.
+- **Where it runs.** The CLIs and their logins live on the host, so plan backends fit the
+  [Mac deployment](deploy/macos/README.md). The Docker image ships only the API backend.
+- **Observability.** `/healthz` reports the backend each role uses, and LLM spans in the dashboard
+  carry the backend, model and token counts.
+
 ```bash
 cp .env.example .env    # set RESUME_AGENT_TOKEN, optionally ANTHROPIC_API_KEY and PUBLIC_BASE_URL
 # profile/ and templates/ are mounted read-only into the container, not baked into the image
@@ -176,11 +212,11 @@ All endpoints except health and the agent card require `Authorization: Bearer $R
 ### MCP tools
 | Tool | Purpose |
 |---|---|
-| `generate_resume(jd_url \| jd_text, slug?, instructions?)` | Full pipeline on the server and returns the PDF. Needs `ANTHROPIC_API_KEY`. |
+| `generate_resume(jd_url \| jd_text, slug?, instructions?)` | Full pipeline on the server and returns the PDF. Needs a server-side LLM backend (plan CLI or API key; see above). |
 | `start_job(jd_url \| jd_text, slug?)` | Fetches the JD and creates a workspace. |
 | `get_resume_context(slug?)` | Returns the rules, fact bank, template, guardrails, reviewer checklist, and the job's JD/tex. |
 | `write_resume(slug, resume_tex, analysis_md?)` | Saves, compiles and proofreads; returns the report and the rendered page image. |
-| `verify_resume(slug)` | Independent verifier in a fresh model call that sees only facts, rules, JD, PDF text and page image (never your analysis). Needs `ANTHROPIC_API_KEY`. |
+| `verify_resume(slug)` | Independent verifier in a fresh model call that sees only facts, rules, JD, PDF text and page image (never your analysis). Needs a server-side LLM backend. |
 | `proofread_resume(slug)` / `get_resume_pdf(slug)` / `list_jobs()` / `fetch_job_description(url)` | Helpers. |
 | `record_application(...)` / `update_application` / `list_applications` / `get_application` / `get_application_file` | Track submitted applications (see below). |
 
@@ -210,7 +246,7 @@ Example Claude Code client config (`.mcp.json` in another project):
 Send a text part with a job URL (any extra text becomes instructions), or a data part
 `{"jd_url", "jd_text", "slug", "instructions"}`. The completed task has a `resume.pdf` file artifact and
 an `analysis.md` text artifact. Pass `configuration.blocking: false` to get a `working` task back
-immediately, then poll `tasks/get`. Server-side generation requires `ANTHROPIC_API_KEY`.
+immediately, then poll `tasks/get`. Server-side generation needs an LLM backend (plan CLI or API key).
 
 ## Tracking submitted applications
 After an application is **actually submitted**, record it. Every entry point writes the same local

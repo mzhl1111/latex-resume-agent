@@ -17,6 +17,9 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+# CLIs installed by their native installers live here (claude, codex)
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 PY="$REPO/.venv/bin/python"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 cd "$REPO"

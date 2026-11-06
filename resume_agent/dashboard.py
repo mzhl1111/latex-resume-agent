@@ -33,7 +33,7 @@ SPAN_ATTRS = {
     "job", "company", "role", "source", "chars", "ok", "pages", "errors", "warnings", "checks", "fill_ratio",
     "verdict", "must_fix", "round", "rounds", "model", "input_tokens", "output_tokens", "tool", "decision",
     "reason", "deliverable", "agent_seconds", "status", "application_id", "platform", "verified", "created",
-    "method", "action", "state", "is_error", "source_slug", "accepted_open_issues", "bounced",
+    "method", "action", "state", "is_error", "source_slug", "accepted_open_issues", "bounced", "backend", "cost_usd",
 }
 
 

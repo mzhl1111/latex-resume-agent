@@ -9,7 +9,8 @@ services:
       # Optional: enables generate_resume (MCP) and A2A generation on the server
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       RESUME_WRITER_MODEL: ${RESUME_WRITER_MODEL:-claude-sonnet-5-5}
-      RESUME_REVIEWER_MODEL: ${RESUME_REVIEWER_MODEL:-claude-sonnet-5-5}
+      RESUME_VERIFIER_MODEL: ${RESUME_VERIFIER_MODEL:-claude-sonnet-5-5}
+      RESUME_LLM_BACKEND: ${RESUME_LLM_BACKEND:-anthropic-api}
       # URL advertised in the A2A agent card, e.g. https://resume.example.com
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Tracing: local (default) | otel | none | module:Class, comma-separated to fan out
