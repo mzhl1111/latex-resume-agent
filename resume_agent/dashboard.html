@@ -540,7 +540,7 @@ function renderLatency(m) {
   const groups = {};
   const add = (k, v) => { (groups[k] = groups[k] || []).push(v); };
   for (const s of m.spans) {
-    if (s.n === "llm.call") add(`LLM · ${s.a.role || "call"}`, s.d);
+    if (s.n === "llm.call") add(`LLM · ${s.a.role || "call"}${s.a.provider && s.a.provider !== "anthropic" ? " (" + s.a.provider + ")" : ""}`, s.d);
     else if (s.n === "agent.writer" || s.n === "agent.verifier") { if (s.a.agent_seconds) add(s.n === "agent.writer" ? "Writer agent" : "Verifier agent", s.a.agent_seconds * 1000); }
     else if (["jd.fetch", "latex.compile", "proofread", "resume.generate"].includes(s.n)) add({ "jd.fetch": "Fetch JD", "latex.compile": "Compile LaTeX", "proofread": "Proofread", "resume.generate": "Full pipeline" }[s.n], s.d);
   }

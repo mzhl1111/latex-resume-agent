@@ -9,7 +9,8 @@ Env:
     RESUME_AGENT_TOKEN   if set, /mcp and /a2a require "Authorization: Bearer <token>"
     RESUME_REQUIRE_TOKEN refuse to start unless RESUME_AGENT_TOKEN is set (>= 24 chars); set for public exposure
     PUBLIC_BASE_URL      URL advertised in the agent card (default: from request)
-    ANTHROPIC_API_KEY    enables generate_resume / A2A generation
+    RESUME_WRITER_MODEL / RESUME_VERIFIER_MODEL   LiteLLM model per role, e.g. anthropic/claude-sonnet-5-5
+                         or openrouter/<org>/<model>; needs ANTHROPIC_API_KEY or OPENROUTER_API_KEY
     RESUME_JOBS_DIR      where job workspaces are written (mount a volume here)
 """
 
@@ -68,8 +69,12 @@ def create_app(*, token: str | None = None, generate=None):
 
     async def health(_request: Request):
         missing = check_dependencies()
+        from .llm import describe
+
+        llm = describe()
         return JSONResponse(
-            {"ok": not missing, "missing": missing, "llm": bool(os.environ.get("ANTHROPIC_API_KEY"))},
+            {"ok": not missing, "missing": missing, "llm": llm,
+             "generate_available": all(v["ready"] for v in llm.values())},
             status_code=200 if not missing else 503,
         )
 

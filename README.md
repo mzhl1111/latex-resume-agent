@@ -9,7 +9,7 @@ It runs two ways on one shared core:
 | Mode | Who does the LLM work | Entry point |
 |---|---|---|
 | **Claude Code** | Claude Code on your plan | `/resume <job-url>` |
-| **MCP / A2A server** | the calling agent, or the server with an `ANTHROPIC_API_KEY` | `docker compose up`, or [a Mac + Cloudflare Tunnel](deploy/macos/README.md) |
+| **MCP / A2A server** | the calling agent, or the server via LiteLLM: Anthropic API or OpenRouter (any vendor) | `docker compose up`, or [a Mac + Cloudflare Tunnel](deploy/macos/README.md) |
 
 Codex still works too: `AGENTS.md` is the single copy of the rules, and `CLAUDE.md` imports it.
 
@@ -158,8 +158,33 @@ Two ways to host it: Docker (below), or natively on a Mac with a Cloudflare Tunn
 needs no open ports and only exposes the agent endpoints. That second option is
 [`deploy/macos/`](deploy/macos/README.md): `resumectl install`, `tunnel-setup`, `start`, `doctor`.
 
+### Models for server-side generation (LiteLLM)
+`generate_resume`, `verify_resume` and A2A call models through [LiteLLM](https://docs.litellm.ai),
+so one setting picks the provider for each role:
+
+| Model string | Provider | Key |
+|---|---|---|
+| `anthropic/claude-sonnet-5-5` (default) | Anthropic API | `ANTHROPIC_API_KEY` |
+| `openrouter/<org>/<model>` (slugs on [openrouter.ai/models](https://openrouter.ai/models)) | OpenRouter: Anthropic, OpenAI, Google, … | `OPENROUTER_API_KEY` |
+
 ```bash
-cp .env.example .env    # set RESUME_AGENT_TOKEN, optionally ANTHROPIC_API_KEY and PUBLIC_BASE_URL
+RESUME_WRITER_MODEL=anthropic/claude-sonnet-5-5
+RESUME_VERIFIER_MODEL=openrouter/openai/<slug>     # a different vendor checks the writer's work
+python3 -m resume_agent llm-check                  # model + key per role, plus a tiny test call
+```
+
+How it works:
+- **Models:** a bare name like `claude-sonnet-5-5` is treated as `anthropic/…`, and `RESUME_LLM_MODEL`
+  sets the default for both roles.
+- **Verifier needs vision:** it receives the rendered page as an image, so pick a vision-capable model
+  for it.
+- **Observability:** `/healthz` shows each role's model and whether its key is set. `llm.call` spans
+  record provider, model, tokens and (when LiteLLM knows the price) cost.
+- **OpenRouter attribution:** calls show up on OpenRouter's dashboard as `OR_APP_NAME`
+  (default `latex-resume-agent`).
+
+```bash
+cp .env.example .env    # set RESUME_AGENT_TOKEN, a model key (Anthropic or OpenRouter) and PUBLIC_BASE_URL
 # profile/ and templates/ are mounted read-only into the container, not baked into the image
 docker compose up --build
 curl localhost:8080/healthz
@@ -176,11 +201,11 @@ All endpoints except health and the agent card require `Authorization: Bearer $R
 ### MCP tools
 | Tool | Purpose |
 |---|---|
-| `generate_resume(jd_url \| jd_text, slug?, instructions?)` | Full pipeline on the server and returns the PDF. Needs `ANTHROPIC_API_KEY`. |
+| `generate_resume(jd_url \| jd_text, slug?, instructions?)` | Full pipeline on the server and returns the PDF. Needs a model key on the server (Anthropic or OpenRouter). |
 | `start_job(jd_url \| jd_text, slug?)` | Fetches the JD and creates a workspace. |
 | `get_resume_context(slug?)` | Returns the rules, fact bank, template, guardrails, reviewer checklist, and the job's JD/tex. |
 | `write_resume(slug, resume_tex, analysis_md?)` | Saves, compiles and proofreads; returns the report and the rendered page image. |
-| `verify_resume(slug)` | Independent verifier in a fresh model call that sees only facts, rules, JD, PDF text and page image (never your analysis). Needs `ANTHROPIC_API_KEY`. |
+| `verify_resume(slug)` | Independent verifier in a fresh model call that sees only facts, rules, JD, PDF text and page image (never your analysis). Needs a model key on the server. |
 | `proofread_resume(slug)` / `get_resume_pdf(slug)` / `list_jobs()` / `fetch_job_description(url)` | Helpers. |
 | `record_application(...)` / `update_application` / `list_applications` / `get_application` / `get_application_file` | Track submitted applications (see below). |
 
@@ -190,7 +215,7 @@ There are two ways a calling agent can use the server:
   The caller's model writes, and a separate verifier signs off rather than the writer itself.
 - **The server does the writing.** Call `generate_resume`. It runs writer → mechanical proofread →
   independent reviewer (the same prompt as the Claude Code subagent, given the rendered PNG) → fix,
-  for up to 3 rounds. Models are set by `RESUME_WRITER_MODEL` / `RESUME_REVIEWER_MODEL`.
+  for up to 3 rounds. Models are set by `RESUME_WRITER_MODEL` / `RESUME_VERIFIER_MODEL` (see above).
 
 Example Claude Code client config (`.mcp.json` in another project):
 
@@ -210,7 +235,7 @@ Example Claude Code client config (`.mcp.json` in another project):
 Send a text part with a job URL (any extra text becomes instructions), or a data part
 `{"jd_url", "jd_text", "slug", "instructions"}`. The completed task has a `resume.pdf` file artifact and
 an `analysis.md` text artifact. Pass `configuration.blocking: false` to get a `working` task back
-immediately, then poll `tasks/get`. Server-side generation requires `ANTHROPIC_API_KEY`.
+immediately, then poll `tasks/get`. Server-side generation needs a model key (Anthropic or OpenRouter).
 
 ## Tracking submitted applications
 After an application is **actually submitted**, record it. Every entry point writes the same local

@@ -108,38 +108,45 @@ def test_a2a_message_send_returns_pdf_artifact():
 # ----------------------------------------------------------------- LLM pipeline (fake client)
 
 
-class FakeClient:
-    """Writer returns a draft with an invented metric first, then a clean one; reviewer passes."""
+class FakeCompletion:
+    """Stands in for litellm.completion. Writer returns a draft with an invented metric first, then a clean
+    one; the verifier passes. Records every call (model + OpenAI-style messages)."""
 
     def __init__(self):
         self.calls = []
-        self.verifier_calls = []
         base = paths.BASE_TEMPLATE.read_text()
         self.drafts = [base.replace(r"\textasciitilde60\%", r"\textasciitilde65\%"), base]
-        self.messages = types.SimpleNamespace(create=self.create)
 
-    def create(self, *, model, max_tokens, system, messages):
-        self.calls.append(list(messages))
+    def __call__(self, *, model, messages, max_tokens):
+        self.calls.append({"model": model, "messages": messages})
+        system = messages[0]["content"]
         if "independent resume verifier" in system:
-            self.verifier_calls.append(messages)
             text = "VERDICT: PASS\n\nMUST FIX\n- none\n\nCONSIDER\n- none"
         else:
             text = f"<analysis>\n# Analysis WRITER-SECRET-REASONING\n</analysis>\n<resume_tex>\n{self.drafts.pop(0)}\n</resume_tex>"
-        return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text=text)])
+        msg = types.SimpleNamespace(content=text)
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)], model=model,
+                                     usage=types.SimpleNamespace(prompt_tokens=1000, completion_tokens=200))
 
 
 @needs_tex
-def test_pipeline_fixes_invented_metric_then_passes_review():
-    fake = FakeClient()
-    res = generate_resume(jd_text=JD, slug="acme-llm", client=fake)
+def test_pipeline_fixes_invented_metric_then_passes_review(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    monkeypatch.setenv("RESUME_WRITER_MODEL", "claude-sonnet-5-5")                 # bare -> anthropic/
+    monkeypatch.setenv("RESUME_VERIFIER_MODEL", "openrouter/openai/gpt-test")     # cross-vendor via OpenRouter
+    fake = FakeCompletion()
+    res = generate_resume(jd_text=JD, slug="acme-llm", completion=fake)
     assert res.ok and res.verdict == "PASS", res.log
-    assert len(fake.calls) == 3  # draft, fix after proofread, review
-    assert "65%" in json.dumps(fake.calls[1][-1])  # proofread report was fed back
-    # The verifier ran in a fresh single-message conversation with no writer context.
-    (v_msgs,) = fake.verifier_calls
-    assert len(v_msgs) == 1 and "WRITER-SECRET-REASONING" not in json.dumps(v_msgs)
-    assert any(b.get("type") == "image" for b in v_msgs[0]["content"])
-    assert (paths.JOBS_DIR / "acme-llm" / "review-1.md").exists()
+    assert [c["model"] for c in fake.calls] == ["anthropic/claude-sonnet-5-5"] * 2 + ["openrouter/openai/gpt-test"]
+    assert "65%" in json.dumps(fake.calls[1]["messages"][-1])  # proofread report was fed back to the writer
+    # The verifier ran in a fresh conversation (system + one user turn) with no writer context.
+    v = fake.calls[2]["messages"]
+    assert [m["role"] for m in v] == ["system", "user"] and "WRITER-SECRET-REASONING" not in json.dumps(v)
+    img = [p for p in v[1]["content"] if p.get("type") == "image_url"]
+    assert img and img[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    review = (paths.JOBS_DIR / "acme-llm" / "review-1.md").read_text()
+    assert "openrouter/openai/gpt-test" in review
 
 
 def test_review_parsing():
