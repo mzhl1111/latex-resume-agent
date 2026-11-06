@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# Run the resume agent on this Mac and expose MCP/A2A through a Cloudflare Tunnel.
+#
+#   deploy/macos/resumectl install        brew deps, TeX packages, venv, .env (+token), launchd agents
+#   deploy/macos/resumectl tunnel-setup   cloudflared login, create tunnel, DNS route, render config
+#   deploy/macos/resumectl start|stop|restart [server|tunnel|dashboard]
+#   deploy/macos/resumectl status         launchd state + local and public health checks
+#   deploy/macos/resumectl doctor         check everything, including that the dashboard is NOT public
+#   deploy/macos/resumectl logs [server|tunnel|dashboard]
+#   deploy/macos/resumectl token          print the bearer token + an MCP client snippet
+#   deploy/macos/resumectl uninstall      remove the launchd agents (keeps your data and tunnel)
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+ENV_FILE="$HERE/.env"
+AGENTS_DIR="${AGENTS_DIR:-$HOME/Library/LaunchAgents}"
+LOG_DIR="${LOG_DIR:-$HOME/Library/Logs/resume-agent}"
+TUNNEL_CONFIG="${TUNNEL_CONFIG:-$HOME/.cloudflared/resume-agent.yml}"
+SERVICES=(server tunnel dashboard)
+LAUNCH_PATH="/opt/homebrew/bin:/usr/local/bin:/Library/TeX/texbin:/usr/bin:/bin:/usr/sbin:/sbin"
+TEX_PACKAGES=(titlesec enumitem preprint marvosym babel-english)
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
+bad()  { printf '  \033[31m✕\033[0m %s\n' "$*"; }
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+load_env() {
+  [[ -f "$ENV_FILE" ]] || die "missing $ENV_FILE (run: resumectl install)"
+  set -a; # shellcheck disable=SC1090
+  source "$ENV_FILE"; set +a
+}
+require_macos() { [[ "$(uname -s)" == "Darwin" ]] || [[ "${RESUMECTL_ALLOW_NON_MAC:-}" == 1 ]] || die "this script targets macOS"; }
+label() { echo "com.resume-agent.$1"; }
+plist() { echo "$AGENTS_DIR/$(label "$1").plist"; }
+enabled_services() {
+  local s
+  for s in "${SERVICES[@]}"; do
+    if [[ "$s" == dashboard && "${DASHBOARD_ENABLED:-1}" != 1 ]]; then continue; fi
+    echo "$s"
+  done
+}
+
+set_env_var() {  # set_env_var KEY VALUE  (in-place, keeps the rest of .env)
+  local key="$1" val="$2" tmp
+  tmp="$(mktemp)"
+  awk -v k="$key" -v v="$val" 'BEGIN{done=0} $0 ~ "^"k"=" {print k"="v; done=1; next} {print} END{if(!done) print k"="v}' "$ENV_FILE" > "$tmp"
+  mv "$tmp" "$ENV_FILE"; chmod 600 "$ENV_FILE"
+}
+
+cmd_install() {
+  require_macos
+  bold "1/6 Homebrew packages"
+  command -v brew >/dev/null || die "install Homebrew first: https://brew.sh"
+  brew bundle --file "$HERE/Brewfile"
+
+  bold "2/6 TeX packages for the template"
+  export PATH="/Library/TeX/texbin:$PATH"
+  command -v tlmgr >/dev/null || die "tlmgr not found; open a new terminal after BasicTeX installs, then re-run"
+  if ! kpsewhich titlesec.sty enumitem.sty fullpage.sty marvosym.sty >/dev/null 2>&1; then
+    echo "  sudo is needed once to add: ${TEX_PACKAGES[*]}"
+    sudo tlmgr update --self
+    sudo tlmgr install "${TEX_PACKAGES[@]}"
+  fi
+  ok "pdflatex: $(command -v pdflatex)"
+
+  bold "3/6 Python environment (.venv)"
+  local py; py="$(brew --prefix python@3.12)/bin/python3.12"
+  [[ -x "$py" ]] || py="$(command -v python3)"
+  [[ -d "$REPO/.venv" ]] || "$py" -m venv "$REPO/.venv"
+  "$REPO/.venv/bin/pip" install -q --upgrade pip
+  "$REPO/.venv/bin/pip" install -q -e "$REPO[server,otel]"
+  ok "installed resume_agent into $REPO/.venv"
+
+  bold "4/6 Private profile"
+  if [[ -f "$REPO/profile/work_history.md" && -f "$REPO/templates/resume_base.tex" ]]; then
+    ok "profile/ and templates/ present"
+  else
+    (cd "$REPO" && .venv/bin/python -m resume_agent init)
+    warn "copied the FICTIONAL example profile; replace profile/ and templates/ with your own data"
+  fi
+
+  bold "5/6 Settings (deploy/macos/.env)"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    cp "$HERE/env.example" "$ENV_FILE"; chmod 600 "$ENV_FILE"
+    ok "created $ENV_FILE"
+  fi
+  load_env
+  if [[ -z "${RESUME_AGENT_TOKEN:-}" ]]; then
+    set_env_var RESUME_AGENT_TOKEN "$(openssl rand -hex 32)"
+    ok "generated RESUME_AGENT_TOKEN (see: resumectl token)"
+  fi
+  [[ -n "${TUNNEL_HOSTNAME:-}${TUNNEL_TOKEN:-}" ]] || warn "set TUNNEL_HOSTNAME in $ENV_FILE before tunnel-setup"
+
+  bold "6/6 launchd agents"
+  mkdir -p "$LOG_DIR" "$AGENTS_DIR"
+  python3 "$HERE/render.py" plists "$AGENTS_DIR" --repo "$REPO" --log-dir "$LOG_DIR" --path "$LAUNCH_PATH" >/dev/null
+  ok "wrote $(label server).plist, $(label tunnel).plist, $(label dashboard).plist to $AGENTS_DIR"
+  echo
+  echo "Next: fill TUNNEL_HOSTNAME in $ENV_FILE, then: resumectl tunnel-setup && resumectl start"
+}
+
+cmd_tunnel_setup() {
+  require_macos; load_env
+  if [[ -n "${TUNNEL_TOKEN:-}" ]]; then
+    ok "TUNNEL_TOKEN is set: dashboard-managed tunnel, nothing to set up locally."
+    echo "  In the Cloudflare dashboard, add a public hostname -> http://127.0.0.1:${RESUME_PORT:-8080}"
+    echo "  and restrict paths to /mcp, /a2a, /healthz and /.well-known/agent-card.json."
+    return
+  fi
+  [[ -n "${TUNNEL_HOSTNAME:-}" ]] || die "set TUNNEL_HOSTNAME in $ENV_FILE (e.g. resume.example.com)"
+  local name="${TUNNEL_NAME:-resume-agent}" id creds
+  if [[ ! -f "$HOME/.cloudflared/cert.pem" ]]; then
+    bold "Log in to Cloudflare (a browser opens; pick the zone for $TUNNEL_HOSTNAME)"
+    cloudflared tunnel login
+  fi
+  id="$(cloudflared tunnel list --output json 2>/dev/null | python3 -c "
+import json,sys; t=[x for x in json.load(sys.stdin) if x.get('name')==sys.argv[1] and not x.get('deleted_at')]
+print(t[0]['id'] if t else '')" "$name")"
+  if [[ -z "$id" ]]; then
+    bold "Creating tunnel $name"
+    cloudflared tunnel create "$name"
+    id="$(cloudflared tunnel list --output json | python3 -c "
+import json,sys; print([x for x in json.load(sys.stdin) if x.get('name')==sys.argv[1]][0]['id'])" "$name")"
+  else
+    ok "reusing tunnel $name ($id)"
+  fi
+  creds="$HOME/.cloudflared/$id.json"
+  [[ -f "$creds" ]] || die "missing credentials $creds (created on another machine? copy it here or delete and recreate the tunnel)"
+  chmod 600 "$creds"
+  bold "Routing $TUNNEL_HOSTNAME -> tunnel"
+  cloudflared tunnel route dns "$name" "$TUNNEL_HOSTNAME" || warn "DNS route exists or failed; check the Cloudflare dashboard"
+  python3 "$HERE/render.py" tunnel "$TUNNEL_CONFIG" --tunnel-id "$id" --credentials "$creds" \
+    --hostname "$TUNNEL_HOSTNAME" --port "${RESUME_PORT:-8080}" >/dev/null
+  cloudflared tunnel --config "$TUNNEL_CONFIG" ingress validate >/dev/null && ok "ingress rules valid"
+  for u in /mcp /a2a /healthz /.well-known/agent-card.json / /files/x/resume.pdf /data.json; do
+    printf '    %-28s -> %s\n' "$u" "$(cloudflared tunnel --config "$TUNNEL_CONFIG" ingress rule "https://$TUNNEL_HOSTNAME$u" 2>/dev/null | awk '/service:/{print $2}' | tail -1)"
+  done
+  ok "wrote $TUNNEL_CONFIG"
+}
+
+launchctl_do() {  # launchctl_do start|stop SERVICE
+  local svc="$1" action="$2" p domain="gui/$(id -u)"
+  p="$(plist "$svc")"
+  [[ -f "$p" ]] || die "missing $p (run: resumectl install)"
+  if [[ "$action" == start ]]; then
+    launchctl bootstrap "$domain" "$p" 2>/dev/null || launchctl kickstart -k "$domain/$(label "$svc")"
+  else
+    launchctl bootout "$domain/$(label "$svc")" 2>/dev/null || true
+  fi
+}
+
+cmd_start() {
+  require_macos; load_env
+  local s list
+  if [[ $# -gt 0 ]]; then list="$*"; else list="$(enabled_services | tr '\n' ' ')"; fi
+  for s in $list; do launchctl_do "$s" start; ok "started $s"; done
+  sleep 2; cmd_status
+}
+cmd_stop() {
+  require_macos; load_env
+  local s list
+  if [[ $# -gt 0 ]]; then list="$*"; else list="${SERVICES[*]}"; fi
+  for s in $list; do launchctl_do "$s" stop; ok "stopped $s"; done
+}
+
+http_code() { curl -s -o /dev/null -m 8 -w '%{http_code}' "$@" || echo 000; }
+
+cmd_status() {
+  load_env
+  bold "launchd"
+  for s in "${SERVICES[@]}"; do
+    if launchctl print "gui/$(id -u)/$(label "$s")" >/dev/null 2>&1; then
+      ok "$s: $(launchctl print "gui/$(id -u)/$(label "$s")" | awk -F'= ' '/^\tstate/{print $2; exit}')"
+    else warn "$s: not loaded"; fi
+  done
+  bold "health"
+  local c; c="$(http_code "http://127.0.0.1:${RESUME_PORT:-8080}/healthz")"
+  [[ "$c" == 200 ]] && ok "local  http://127.0.0.1:${RESUME_PORT:-8080}/healthz" || bad "local server: HTTP $c (resumectl logs server)"
+  if [[ -n "${TUNNEL_HOSTNAME:-}" ]]; then
+    c="$(http_code "https://$TUNNEL_HOSTNAME/healthz")"
+    [[ "$c" == 200 ]] && ok "public https://$TUNNEL_HOSTNAME/healthz" || bad "public: HTTP $c (resumectl logs tunnel)"
+  fi
+  [[ "${DASHBOARD_ENABLED:-1}" == 1 ]] && echo "  dashboard (local only): http://localhost:${DASHBOARD_PORT:-8050}/"
+}
+
+cmd_doctor() {
+  load_env
+  local fail=0
+  bold "tools"
+  for b in pdflatex pdfinfo pdftoppm pdftotext cloudflared; do
+    if PATH="$LAUNCH_PATH:$PATH" command -v "$b" >/dev/null; then ok "$b"; else bad "$b missing"; fail=1; fi
+  done
+  [[ -x "$REPO/.venv/bin/python" ]] && ok ".venv" || { bad ".venv missing (resumectl install)"; fail=1; }
+  bold "data"
+  for f in profile/work_history.md profile/rules.md templates/resume_base.tex; do
+    [[ -f "$REPO/$f" ]] && ok "$f" || { bad "$f missing"; fail=1; }
+  done
+  if grep -q "FICTIONAL EXAMPLE" "$REPO/profile/work_history.md" 2>/dev/null; then warn "profile is still the fictional example"; fi
+  bold "secrets"
+  local tok="${RESUME_AGENT_TOKEN:-}"
+  [[ ${#tok} -ge 32 ]] && ok "RESUME_AGENT_TOKEN set" || { bad "RESUME_AGENT_TOKEN missing/short"; fail=1; }
+  [[ "$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || stat -c '%a' "$ENV_FILE")" == 600 ]] && ok ".env is chmod 600" || warn "chmod 600 $ENV_FILE"
+  git -C "$REPO" check-ignore -q "$ENV_FILE" && ok ".env is gitignored" || { bad ".env is NOT gitignored"; fail=1; }
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && ok "ANTHROPIC_API_KEY set (generate/verify enabled)" || warn "no ANTHROPIC_API_KEY: callers must use the caller-driven tools"
+  bold "tunnel"
+  if [[ -n "${TUNNEL_TOKEN:-}" ]]; then ok "dashboard-managed tunnel (TUNNEL_TOKEN)"
+  elif [[ -f "$TUNNEL_CONFIG" ]]; then ok "$TUNNEL_CONFIG"; else bad "no tunnel config (resumectl tunnel-setup)"; fail=1; fi
+  if [[ -n "${TUNNEL_HOSTNAME:-}" ]]; then
+    local h="https://$TUNNEL_HOSTNAME"
+    [[ "$(http_code "$h/healthz")" == 200 ]] && ok "public health" || { bad "public health check failed"; fail=1; }
+    [[ "$(http_code -X POST "$h/mcp" -H 'Content-Type: application/json' -d '{}')" == 401 ]] && ok "MCP rejects missing token (401)" || { bad "MCP did not return 401 without a token"; fail=1; }
+    for p in / /data.json /files/x/resume.pdf /api/applications/x/update; do
+      local c; c="$(http_code "$h$p")"
+      [[ "$c" == 404 ]] && ok "dashboard path $p not public ($c)" || { bad "$p is reachable publicly (HTTP $c)"; fail=1; }
+    done
+  fi
+  bold "power"
+  if pmset -g 2>/dev/null | awk '/ sleep /{exit !($2==0)}'; then ok "system sleep disabled"; else warn "the Mac sleeps -> the tunnel goes offline; consider: sudo pmset -c sleep 0 (on power)"; fi
+  return $fail
+}
+
+cmd_logs() { local s="${1:-server}"; tail -n 200 -f "$LOG_DIR/$s.log"; }
+
+cmd_token() {
+  load_env
+  local url="${PUBLIC_BASE_URL:-https://${TUNNEL_HOSTNAME:-<TUNNEL_HOSTNAME>}}"
+  echo "RESUME_AGENT_TOKEN=${RESUME_AGENT_TOKEN:-<unset: run resumectl install>}"
+  cat <<EOF
+
+MCP client config (e.g. .mcp.json):
+{
+  "mcpServers": {
+    "resume": {
+      "type": "http",
+      "url": "$url/mcp",
+      "headers": { "Authorization": "Bearer \${RESUME_AGENT_TOKEN}" }
+    }
+  }
+}
+A2A agent card: $url/.well-known/agent-card.json
+EOF
+}
+
+cmd_uninstall() {
+  require_macos
+  for s in "${SERVICES[@]}"; do launchctl bootout "gui/$(id -u)/$(label "$s")" 2>/dev/null || true; rm -f "$(plist "$s")"; done
+  ok "removed launchd agents (kept .venv, $ENV_FILE, $TUNNEL_CONFIG, your data and the Cloudflare tunnel)"
+}
+
+cmd_render() {  # internal/testing: render everything into a directory without touching launchd
+  local out="${1:?out dir}"
+  python3 "$HERE/render.py" plists "$out/LaunchAgents" --repo "$REPO" --log-dir "$out/logs" --path "$LAUNCH_PATH"
+}
+
+case "${1:-}" in
+  install) cmd_install ;;
+  tunnel-setup) cmd_tunnel_setup ;;
+  start) shift; if [[ $# -gt 0 ]]; then cmd_start "$@"; else cmd_start; fi ;;
+  stop) shift; if [[ $# -gt 0 ]]; then cmd_stop "$@"; else cmd_stop; fi ;;
+  restart) shift; cmd_stop "$@"; if [[ $# -gt 0 ]]; then cmd_start "$@"; else cmd_start; fi ;;
+  status) cmd_status ;;
+  doctor) cmd_doctor ;;
+  logs) shift; cmd_logs "${1:-server}" ;;
+  token) cmd_token ;;
+  uninstall) cmd_uninstall ;;
+  render) shift; cmd_render "${1:-}" ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 64 ;;
+esac

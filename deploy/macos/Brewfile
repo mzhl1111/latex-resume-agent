@@ -1,0 +1,5 @@
+# brew bundle --file deploy/macos/Brewfile   (resumectl install runs this)
+brew "python@3.12"
+brew "poppler"          # pdfinfo, pdftoppm, pdftotext
+brew "cloudflared"      # Cloudflare Tunnel
+cask "basictex"         # pdflatex; resumectl adds the few extra TeX packages the template needs
