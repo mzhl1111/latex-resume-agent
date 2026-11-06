@@ -172,6 +172,28 @@ def get_resume_pdf(slug: str) -> t.CallToolResult:
     )
 
 
+@mcp.tool(
+    description="Independent verification of a job's current resume by a separate model call that sees only "
+    "the fact bank, rules, JD, PDF text and rendered page (never your reasoning or analysis). Use this instead "
+    "of reviewing your own draft. Requires ANTHROPIC_API_KEY on the server."
+)
+async def verify_resume(slug: str) -> t.CallToolResult:
+    from .llm_pipeline import PipelineError
+    from .llm_pipeline import verify_resume as run_verify
+
+    ws = get_job(slug)
+    if not ws.tex.exists():
+        return t.CallToolResult(content=[t.TextContent(type="text", text=f"No job '{slug}'")], is_error=True)
+    try:
+        v = await anyio.to_thread.run_sync(lambda: run_verify(ws))
+    except PipelineError as exc:
+        return t.CallToolResult(content=[t.TextContent(type="text", text=str(exc))], is_error=True)
+    return t.CallToolResult(
+        content=[t.TextContent(type="text", text=v.review)],
+        structured_content={"slug": slug, "verdict": v.verdict, "must_fix": v.must_fix},
+    )
+
+
 @mcp.tool(structured_output=True, description="List job workspaces on this server.")
 def list_jobs() -> list[dict[str, Any]]:
     if not paths.JOBS_DIR.exists():
@@ -222,5 +244,8 @@ def tailor_resume(job_url: str) -> str:
 3. Map the JD's 5–8 core requirements to evidence, then edit the BODY of base_template_tex.
 4. write_resume(slug, resume_tex, analysis_md). Fix every ERROR/WARN in the report by editing content;
    look at the returned page image and fix visual problems. Repeat.
-5. Review once more against reviewer_checklist_md as if you were a stranger; fix MUST FIX items.
+5. Do not sign off on your own draft. Call verify_resume(slug): an independent verifier with no access
+   to your reasoning. Fix its MUST FIX items with write_resume and call verify_resume again (max 3 rounds).
+   If the server has no API key, hand the PDF, reviewer_checklist_md, profile_rules_md and work_history_md
+   to a separate agent that has not seen this conversation.
 6. get_resume_pdf(slug) and hand the PDF to the user."""

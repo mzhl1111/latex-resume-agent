@@ -14,11 +14,12 @@ from __future__ import annotations
 import base64
 import os
 import re
+import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import paths
+from . import gate, paths
 from .jd_fetch import fetch_jd, slugify
 from .proofread import proofread
 from .workspace import JobWorkspace, new_job
@@ -157,7 +158,6 @@ def generate_resume(
             ws.analysis.write_text(analysis.strip() + "\n")
         ws.tex.write_text(tex.strip() + "\n")
 
-    reviewer_system = _strip_frontmatter(REVIEWER_PROMPT.read_text())
     review, verdict, remaining = "", "NOT REVIEWED", []
     rounds = 0
     write_round()
@@ -187,39 +187,17 @@ def generate_resume(
             verdict = "FAILED MECHANICAL CHECKS"
             break
 
-        # 3. independent visual + truthfulness review
-        png_b64 = base64.standard_b64encode(ws.png.read_bytes()).decode()
-        resp = client.messages.create(
-            model=reviewer_model,
-            max_tokens=2000,
-            system=reviewer_system,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"<work_history>\n{paths.WORK_HISTORY.read_text()}\n</work_history>"},
-                        {"type": "text", "text": f"<agents_md>\n{agents_md}\n</agents_md>"},
-                        {"type": "text", "text": f"<jd>\n{ws.jd.read_text()}\n</jd>"},
-                        {"type": "text", "text": f"<resume_tex>\n{ws.tex.read_text()}\n</resume_tex>"},
-                        {"type": "text", "text": f"<proofread_md>\n{ws.proofread.read_text()}\n</proofread_md>"},
-                        {"type": "text", "text": "Rendered page (resume.png):"},
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png_b64}},
-                        {"type": "text", "text": "Review it now. The files are inlined above; you cannot run tools."},
-                    ],
-                }
-            ],
-        )
-        review = _text(resp)
-        (ws.dir / "review.md").write_text(review)
-        remaining = _review_issues(review)
-        verdict = "PASS" if "VERDICT: PASS" in review and not remaining else "NEEDS CHANGES"
-        note(f"Round {rounds}: reviewer verdict {verdict} ({len(remaining)} must-fix)")
+        # 3. independent verifier: a fresh conversation built only from artifacts
+        v = verify_resume(ws, client=client, model=reviewer_model, round_no=rounds)
+        review = v.review
+        remaining, verdict = v.must_fix, v.verdict
+        note(f"Round {rounds}: verifier verdict {verdict} ({len(remaining)} must-fix)")
         if verdict == "PASS" or rounds == max_rounds:
             break
         messages.append(
             {
                 "role": "user",
-                "content": "An independent reviewer returned:\n\n" + review
+                "content": "The independent verifier returned:\n\n" + review
                 + "\n\nApply every MUST FIX item; apply CONSIDER items where they help. "
                 "Return the full output format again.",
             }
@@ -228,3 +206,75 @@ def generate_resume(
 
     ok = verdict == "PASS"
     return GenerationResult(ok, ws.describe(), rounds, verdict, remaining, review, log)
+
+
+# --------------------------------------------------------------------------- verifier
+
+
+@dataclass
+class Verification:
+    verdict: str  # "PASS" | "NEEDS CHANGES" | "FAILED MECHANICAL CHECKS"
+    must_fix: list[str]
+    review: str
+    review_path: str
+
+
+def verifier_inputs(ws: JobWorkspace) -> list[dict]:
+    """The verifier's entire world: source facts, rules, JD, and the produced artifacts.
+
+    Deliberately excludes analysis.md, earlier reviews and the writer conversation, so the
+    verifier judges the resume the way a recruiter and a fact-checker would.
+    """
+    pdf_text = subprocess.run(
+        ["pdftotext", "-layout", str(ws.pdf), "-"], capture_output=True, text=True, check=True
+    ).stdout
+    png_b64 = base64.standard_b64encode(ws.png.read_bytes()).decode()
+    blocks = [
+        ("work_history", paths.WORK_HISTORY.read_text()),
+        ("agents_md", paths.AGENT_INSTRUCTIONS.read_text()),
+        ("profile_rules", paths.read_rules()),
+        ("jd", ws.jd.read_text()),
+        ("proofread_md", ws.proofread.read_text()),
+        ("resume_pdf_text", pdf_text),
+        ("resume_tex", ws.tex.read_text()),
+    ]
+    content: list[dict] = [{"type": "text", "text": f"<{k}>\n{v}\n</{k}>"} for k, v in blocks]
+    content += [
+        {"type": "text", "text": "Rendered page (resume.png):"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png_b64}},
+        {
+            "type": "text",
+            "text": "Verify it now. The files are inlined above and the mechanical proofread was just "
+            "re-run for you; you cannot run tools.",
+        },
+    ]
+    return content
+
+
+def verify_resume(
+    ws: JobWorkspace,
+    *,
+    client: Any = None,
+    model: str = DEFAULT_REVIEWER_MODEL,
+    round_no: int | None = None,
+) -> Verification:
+    """Run one independent verification in a brand-new conversation."""
+    client = client or _client()
+    rep = proofread(ws.tex)  # fresh compile + report; never trust an old one
+    ws.proofread.write_text(rep.to_markdown())
+    if not ws.pdf.exists() or not ws.png.exists():
+        issues = [f"{i.check}: {i.message}" for i in rep.issues if i.severity == "error"]
+        return Verification("FAILED MECHANICAL CHECKS", issues, rep.to_markdown(), "")
+    resp = client.messages.create(
+        model=model,
+        max_tokens=2000,
+        system=_strip_frontmatter(REVIEWER_PROMPT.read_text()),
+        messages=[{"role": "user", "content": verifier_inputs(ws)}],
+    )
+    review = _text(resp)
+    path = gate.record_review(ws.dir, review, source=f"server verifier ({model})")
+    must_fix = _review_issues(review)
+    if not rep.ok:
+        must_fix = [f"{i.check}: {i.message}" for i in rep.issues if i.severity == "error"] + must_fix
+    verdict = "PASS" if "VERDICT: PASS" in review and not must_fix else "NEEDS CHANGES"
+    return Verification(verdict, must_fix, review, str(path))

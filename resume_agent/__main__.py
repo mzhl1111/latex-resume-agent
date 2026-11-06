@@ -6,6 +6,8 @@
     python -m resume_agent fetch-jd <url>              print JD markdown only
     python -m resume_agent check <tex>                 compile + 1-page check + PNG
     python -m resume_agent proofread <tex> [--json]    compile + mechanical proofread
+    python -m resume_agent status <job-dir>            review rounds + delivery gate
+    python -m resume_agent deliver <job-dir> --name F  copy PDF to outputs/ if the verifier passed it
     python -m resume_agent serve [--port 8080]         MCP + A2A HTTP server
 """
 
@@ -16,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import paths
+from . import gate, paths
 from .compile import compile_resume
 from .jd_fetch import FetchError, fetch_jd, slugify
 from .proofread import proofread
@@ -76,6 +78,15 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("init", help="create profile/ and templates/ from examples/ (never overwrites)")
 
+    st = sub.add_parser("status", help="show review rounds and whether the job can be delivered")
+    st.add_argument("job")
+
+    dl = sub.add_parser("deliver", help="copy resume.pdf to outputs/ (gated on an independent PASS)")
+    dl.add_argument("job")
+    dl.add_argument("--name", required=True, help="output file name, e.g. Jane_Doe_Acme_MLE.pdf")
+    dl.add_argument("--accept-open-issues", action="store_true",
+                    help=f"deliver after {gate.MAX_ROUNDS} rounds even if the last verdict is not PASS")
+
     sv = sub.add_parser("serve")
     sv.add_argument("--host", default="0.0.0.0")
     sv.add_argument("--port", type=int, default=8080)
@@ -125,6 +136,27 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.tex).with_name("proofread.md").write_text(out)
         print(json.dumps(rep.to_dict(), indent=2) if args.json else out)
         return 0 if rep.ok else 1
+    if args.cmd in ("status", "deliver"):
+        job = Path(args.job)
+        st_ = gate.delivery_status(job, accept_open_issues=getattr(args, "accept_open_issues", False))
+        if args.cmd == "status":
+            for r in gate.reviews(job):
+                print(f"{r.path.name}: {r.verdict} (must fix: {r.must_fix})")
+            print(("DELIVERABLE: " if st_.deliverable else "BLOCKED: ") + st_.reason)
+            return 0 if st_.deliverable else 1
+        if not st_.deliverable:
+            print(f"BLOCKED: {st_.reason}", file=sys.stderr)
+            return 1
+        name = Path(args.name).name
+        if not name.endswith(".pdf"):
+            name += ".pdf"
+        out = paths.REPO_ROOT / "outputs" / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+
+        shutil.copy(job / "resume.pdf", out)
+        print(f"Delivered {out} ({st_.reason})")
+        return 0
     if args.cmd == "serve":
         from .server import run
 
