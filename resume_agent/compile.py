@@ -8,6 +8,8 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from . import tracing
+
 AUX_SUFFIXES = (".aux", ".out", ".toc", ".synctex.gz")
 
 
@@ -69,6 +71,15 @@ def pdf_pages(pdf: Path) -> int:
 
 def compile_resume(tex_path: str | Path, *, dpi: int = 160, clean: bool = True) -> CompileResult:
     tex = Path(tex_path).resolve()
+    with tracing.span("latex.compile", job=tex.parent.name) as s:
+        res = _compile(tex, dpi=dpi, clean=clean)
+        s.set(ok=res.ok, pages=res.pages or 0, errors=len(res.errors), overfull=len(res.overfull_boxes))
+        if res.errors:
+            s.set_error(res.errors[0])
+        return res
+
+
+def _compile(tex: Path, *, dpi: int, clean: bool) -> CompileResult:
     if not tex.exists():
         return CompileResult(ok=False, tex=str(tex), errors=[f"{tex} does not exist"])
     missing = check_dependencies()

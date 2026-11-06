@@ -12,6 +12,7 @@ import traceback
 
 sys.path.insert(0, os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+os.environ.setdefault("RESUME_TRACE_MODE", "claude-code")
 ev = {}
 try:
     ev = json.load(sys.stdin)

@@ -21,7 +21,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from . import paths
+from . import paths, tracing
 from .compile import compile_resume
 
 ORPHAN_MAX_WORDS = 2
@@ -269,6 +269,20 @@ def _hygiene_checks(text: str, issues: list[Issue]) -> None:
 
 def proofread(tex_path: str | Path, *, recompile: bool = True) -> ProofreadReport:
     tex = Path(tex_path).resolve()
+    with tracing.span("proofread", job=tex.parent.name) as s:
+        rep = _proofread(tex, recompile=recompile)
+        sev = [i.severity for i in rep.issues]
+        s.set(
+            ok=rep.ok,
+            errors=sev.count("error"),
+            warnings=sev.count("warn"),
+            checks=sorted({i.check for i in rep.issues}),
+            fill_ratio=rep.stats.get("fill_ratio"),
+        )
+        return rep
+
+
+def _proofread(tex: Path, *, recompile: bool) -> ProofreadReport:
     issues: list[Issue] = []
     stats: dict = {}
     pdf, png = tex.with_suffix(".pdf"), tex.with_suffix(".png")

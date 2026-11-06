@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import gate, paths
+from . import gate, paths, tracing
 from .jd_fetch import fetch_jd, slugify
 from .proofread import proofread
 from .workspace import JobWorkspace, new_job
@@ -74,6 +74,18 @@ def _client():
     return anthropic.Anthropic()
 
 
+def _llm(client: Any, *, role: str, job: str, **kwargs: Any) -> Any:
+    """One model call, traced with token usage."""
+    with tracing.span("llm.call", role=role, model=kwargs.get("model"), job=job) as s:
+        resp = client.messages.create(**kwargs)
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            s.set(input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                  output_tokens=getattr(usage, "output_tokens", 0) or 0)
+        s.set(stop_reason=getattr(resp, "stop_reason", None))
+        return resp
+
+
 def _text(resp: Any) -> str:
     return "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
 
@@ -95,7 +107,17 @@ def _review_issues(review: str) -> list[str]:
     return [i for i in items if i.lower() not in {"none", "none."}]
 
 
-def generate_resume(
+def generate_resume(**kwargs: Any) -> "GenerationResult":
+    """Full server-side pipeline (traced as ``resume.generate``)."""
+    with tracing.span("resume.generate", has_url=bool(kwargs.get("jd_url")), writer_model=kwargs.get("writer_model"),
+                      instructions=bool(kwargs.get("instructions"))) as s:
+        res = _generate_resume(**kwargs)
+        s.set(job=res.workspace["slug"], ok=res.ok, verdict=res.verdict, rounds=res.rounds,
+              remaining=len(res.remaining_issues))
+        return res
+
+
+def _generate_resume(
     *,
     jd_url: str | None = None,
     jd_text: str | None = None,
@@ -147,7 +169,8 @@ def generate_resume(
     messages: list[dict] = [{"role": "user", "content": context}]
 
     def write_round() -> None:
-        resp = client.messages.create(model=writer_model, max_tokens=8000, system=system, messages=messages)
+        resp = _llm(client, role="writer", job=ws.slug, model=writer_model, max_tokens=8000, system=system,
+                    messages=messages)
         out = _text(resp)
         messages.append({"role": "assistant", "content": out})
         tex = _tag(out, "resume_tex")
@@ -259,13 +282,23 @@ def verify_resume(
     round_no: int | None = None,
 ) -> Verification:
     """Run one independent verification in a brand-new conversation."""
+    with tracing.span("resume.verify", job=ws.slug, model=model, source="server") as s:
+        v = _verify(ws, client=client, model=model)
+        s.set(verdict=v.verdict, must_fix=len(v.must_fix))
+        return v
+
+
+def _verify(ws: JobWorkspace, *, client: Any, model: str) -> Verification:
     client = client or _client()
     rep = proofread(ws.tex)  # fresh compile + report; never trust an old one
     ws.proofread.write_text(rep.to_markdown())
     if not ws.pdf.exists() or not ws.png.exists():
         issues = [f"{i.check}: {i.message}" for i in rep.issues if i.severity == "error"]
         return Verification("FAILED MECHANICAL CHECKS", issues, rep.to_markdown(), "")
-    resp = client.messages.create(
+    resp = _llm(
+        client,
+        role="verifier",
+        job=ws.slug,
         model=model,
         max_tokens=2000,
         system=_strip_frontmatter(REVIEWER_PROMPT.read_text()),

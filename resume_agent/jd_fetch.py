@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from . import tracing
 from .html_text import html_to_text
 
 USER_AGENT = (
@@ -285,6 +286,17 @@ def parse_html_page(url: str, page: str) -> JobDescription:
 
 def fetch_jd(url: str, *, get: Callable | None = None) -> JobDescription:
     """Fetch and normalise a JD. ``get`` is injectable for tests."""
+    with tracing.span("jd.fetch", host=urlparse(url).hostname or "") as s:
+        try:
+            jd = _fetch_jd(url, get=get)
+        except FetchError as exc:
+            s.set_error(exc)
+            raise
+        s.set(source=jd.source, chars=len(jd.text), company=jd.company, role=jd.title)
+        return jd
+
+
+def _fetch_jd(url: str, *, get: Callable | None = None) -> JobDescription:
     url = url.strip()
     if not re.match(r"^https?://", url):
         raise FetchError(f"Not an http(s) URL: {url!r}")

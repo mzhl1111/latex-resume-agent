@@ -22,6 +22,8 @@ TEMPLATES_DIR = _env_path("RESUME_TEMPLATES_DIR", REPO_ROOT / "templates")
 JOBS_DIR = _env_path("RESUME_JOBS_DIR", REPO_ROOT / "jobs")
 # Where submitted-application records are kept (one folder per application).
 APPLICATIONS_DIR = _env_path("RESUME_APPLICATIONS_DIR", REPO_ROOT / "applications")
+# Local trace spans (JSONL) written by the default tracer and read by the dashboard.
+TRACES_DIR = _env_path("RESUME_TRACES_DIR", REPO_ROOT / "traces")
 
 WORK_HISTORY = PROFILE_DIR / "work_history.md"
 GUARDRAILS = PROFILE_DIR / "guardrails.json"

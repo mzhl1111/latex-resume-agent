@@ -61,6 +61,9 @@ resume_agent/                      Shared Python core
   harness.py                         Claude Code hook policy (writer/verifier separation)
   gate.py                            harness-stamped review records + delivery gate
   applications.py                    submitted-application tracker (applications/, index.md/csv)
+  tracing.py                         pluggable tracer: local JSONL (default) | otel | none | module:Class
+  dashboard.py, dashboard.html       local dashboard over traces/ + applications/
+  demo.py                            fictional demo data generator
   llm_pipeline.py                    server-side writer → proofread → reviewer loop (Anthropic API)
   mcp_server.py, a2a_server.py, server.py   MCP + A2A over one HTTP app
 scripts/                           Original shell helpers (still work)
@@ -149,7 +152,7 @@ All endpoints except health and the agent card require `Authorization: Bearer $R
 | `write_resume(slug, resume_tex, analysis_md?)` | Saves, compiles and proofreads; returns the report and the rendered page image. |
 | `verify_resume(slug)` | Independent verifier in a fresh model call that sees only facts, rules, JD, PDF text and page image (never your analysis). Needs `ANTHROPIC_API_KEY`. |
 | `proofread_resume(slug)` / `get_resume_pdf(slug)` / `list_jobs()` / `fetch_job_description(url)` | Helpers. |
-| `record_application(...)` / `update_application` / `list_applications` / `get_application` | Track submitted applications (see below). |
+| `record_application(...)` / `update_application` / `list_applications` / `get_application` / `get_application_file` | Track submitted applications (see below). |
 
 There are two ways a calling agent can use the server:
 - **The caller does the writing (no server key needed).** Use the `tailor_resume` prompt:
@@ -217,6 +220,85 @@ What gets checked and stored at record time:
 
 Hooks block agents from editing `applications/` directly. Changes go through the CLI or tools so the
 index and hashes stay consistent.
+
+## Tracing and dashboard
+
+![Dashboard with fictional demo data](docs/dashboard.png)
+
+*Screenshot generated from fictional demo data (`python3 -m resume_agent demo-data`).*
+
+### Tracing (pluggable)
+Every stage emits spans through `resume_agent.tracing`. The backend is chosen with `RESUME_TRACER`:
+
+| Value | Where spans go |
+|---|---|
+| `local` (default) | JSON lines in `traces/spans-YYYY-MM-DD.jsonl` (gitignored; `RESUME_TRACES_DIR` to move it). The dashboard reads these. |
+| `otel` | OpenTelemetry API, with attributes prefixed `resume.`. If the SDK and OTLP exporter are installed (`pip install ".[otel]"`, already in the Docker image) and `OTEL_EXPORTER_OTLP_ENDPOINT` is set, an OTLP/HTTP exporter is configured automatically. Otherwise the host process's provider is used. |
+| `none` | Tracing off. |
+| `pkg.module:MyTracer` | Your own `resume_agent.tracing.Tracer` subclass. Implement `span(name, attrs)` as a context manager. |
+
+Combine backends with commas. For example, `RESUME_TRACER=local,otel` keeps the local dashboard working
+while also exporting to Jaeger, Honeycomb, Grafana and so on.
+
+Spans cover: JD fetch, workspace creation, LaTeX compile, proofread (findings), LLM calls (model, role,
+input/output tokens), server generation and verification, review records (round, verdict), delivery,
+application record/update, every MCP tool call (server middleware), A2A requests, and harness actions
+(denials, verifier prompt rewrites, writer/verifier agent durations).
+
+Spans hold metadata only: ids, timings, counts, verdicts, company/role, model, tokens. They never hold
+resume text, JD text or application answers. A broken tracer config falls back to `none` instead of
+breaking resume generation.
+
+### Dashboard
+```bash
+python3 -m resume_agent dashboard --open              # http://127.0.0.1:8050, re-reads traces/ + applications/ on each load
+python3 -m resume_agent dashboard --export report.html  # one self-contained offline HTML file
+docker compose --profile dashboard up dashboard          # same, from the container volumes
+
+python3 -m resume_agent demo-data --out demo             # fictional data to try it
+python3 -m resume_agent dashboard --traces demo/traces --applications demo/applications
+```
+
+What it shows:
+- **Key numbers:** resumes tailored, first-pass verifier PASS rate, average rounds to PASS,
+  applications submitted, response rate, LLM tokens.
+- **Activity:** resumes tailored vs applications submitted over time.
+- **Application funnel:** submitted → response → screen → interview → offer.
+- **Verifier verdicts by round.**
+- **What the proofreader catches:** its most common findings.
+- **Where time goes:** median and p95 duration per stage.
+- **Recent tailoring runs:** click one to see a per-run trace waterfall.
+- **Harness enforcement:** denials by role and reason.
+- **Applications table.**
+
+**Working with applications.** Clicking a row in the applications table, or a stage in the funnel,
+opens a detail panel. It shows the job link, submission time, confirmation number, whether the
+resume was verified, the full timeline and every application question with the answer given. It
+also links to the exact PDF submitted, the cover letter and the posting snapshot. From the panel you
+can **change the status**, with suggested next steps first and an editable timestamp. You can also
+add a note, set the confirmation number, or add a question and answer from a follow-up form.
+
+![Application detail panel (fictional demo data)](docs/dashboard-application.png)
+
+Saving calls the same `applications.update_application` that the CLI, MCP and A2A use, so the
+timeline, `index.md` and traces stay consistent no matter where an update comes from. The local
+server only accepts edits from its own page:
+- it checks the Host header is localhost (against DNS rebinding);
+- it rejects cross-origin requests;
+- each request needs a per-process token and a JSON body.
+
+It only serves files from inside an application folder. Use `--read-only` to turn editing off.
+Exported HTML is always read-only.
+
+| Action | Dashboard | CLI | MCP | A2A (`data.action`) |
+|---|---|---|---|---|
+| Change status, note, confirmation #, add Q&A | detail panel | `app update <id> --status ... --note ...` | `update_application` | `update_application` |
+| Open a record | click a row | `app show <id>` | `get_application` | `get_application` |
+| Open its files (PDF, cover letter, posting, Q&A) | links in the panel | `app file <id> [name] [--out f]` | `get_application_file` | `get_application_file` |
+
+Filters for date range and run mode scope everything on the page. Each chart has a table view and a
+hover tooltip, and the page follows your OS light/dark setting (with a toggle). It has no
+dependencies, makes no network calls and is a single HTML file.
 
 ## Proofreading checks
 `resume_agent/proofread.py` fails the resume on:

@@ -189,7 +189,7 @@ def test_hook_shim_end_to_end(proj):
     r = subprocess.run(
         [sys.executable, str(REPO / ".claude/hooks/resume_harness.py")],
         input=json.dumps(payload), capture_output=True, text=True,
-        env={"CLAUDE_PROJECT_DIR": str(REPO), "PATH": "/usr/bin:/bin"},
+        env={"CLAUDE_PROJECT_DIR": str(REPO), "PATH": "/usr/bin:/bin", "RESUME_TRACER": "none"},
     )
     # CLAUDE_PROJECT_DIR points at the repo so the import works; path is relative so the rule still applies
     assert r.returncode == 0 and json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"

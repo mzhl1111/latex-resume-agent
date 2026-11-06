@@ -12,6 +12,8 @@
     python -m resume_agent app update <id> [--status S] [--note N]
     python -m resume_agent app list [--status S] [--company C] [--since DATE]
     python -m resume_agent app show <id>
+    python -m resume_agent dashboard [--port 8050] [--export F.html] [--traces D] [--applications D]
+    python -m resume_agent demo-data [--out demo]      fictional traces + applications for the dashboard
     python -m resume_agent serve [--port 8080]         MCP + A2A HTTP server
 """
 
@@ -128,6 +130,20 @@ def _app(args) -> int:
                 print(f"{r['submitted_at'][:10]}  {r['status']:<12} {r['company'][:24]:<24} {r['role'][:40]:<40} {r['id']}{flag}")
             print(f"{len(rows)} application(s); index: {paths.APPLICATIONS_DIR / 'index.md'}")
         return 0
+    if args.app_cmd == "file":
+        if not args.name:
+            for f in apps_mod.list_files(args.id):
+                print(f"{f['name']:<40} {f['bytes']:>9}  {f['mime']}")
+            return 0
+        data, mime = apps_mod.read_file(args.id, args.name)
+        if args.out:
+            Path(args.out).write_bytes(data)
+            print(f"Wrote {args.out} ({len(data)} bytes, {mime})")
+        elif mime.startswith("text/"):
+            sys.stdout.write(data.decode("utf-8", "replace"))
+        else:
+            raise apps_mod.ApplicationError(f"{args.name} is {mime}; pass --out <path>")
+        return 0
     rec = apps_mod.get_application(args.id)
     print(json.dumps(rec, indent=2, ensure_ascii=False))
     return 0
@@ -195,6 +211,27 @@ def main(argv: list[str] | None = None) -> int:
     lst.add_argument("--json", action="store_true")
     shw = asub.add_parser("show")
     shw.add_argument("id")
+    fl = asub.add_parser("file", help="list an application's files, or print/extract one")
+    fl.add_argument("id")
+    fl.add_argument("name", nargs="?", help="e.g. resume.pdf, cover_letter.md, jd.md, answers.md")
+    fl.add_argument("--out", help="write the file here instead of printing (binary files need this)")
+
+    db = sub.add_parser("dashboard", help="local dashboard over traces/ and applications/")
+    db.add_argument("--host", default="127.0.0.1")
+    db.add_argument("--port", type=int, default=8050)
+    db.add_argument("--traces", help="traces dir (default RESUME_TRACES_DIR or ./traces)")
+    db.add_argument("--applications", help="applications dir (default RESUME_APPLICATIONS_DIR or ./applications)")
+    db.add_argument("--export", help="write a self-contained HTML file instead of serving")
+    db.add_argument("--title")
+    db.add_argument("--open", action="store_true", help="open a browser tab")
+    db.add_argument("--read-only", action="store_true", help="disable editing application status from the page")
+    db.add_argument("--allow-host", action="append", default=[], help="extra Host header to accept (e.g. a LAN name)")
+
+    dd = sub.add_parser("demo-data", help="generate fictional traces + applications")
+    dd.add_argument("--out", default="demo")
+    dd.add_argument("--days", type=int, default=60)
+    dd.add_argument("--jobs", type=int, default=48)
+    dd.add_argument("--seed", type=int, default=7)
 
     sv = sub.add_parser("serve")
     sv.add_argument("--host", default="0.0.0.0")
@@ -253,6 +290,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{r.path.name}: {r.verdict} (must fix: {r.must_fix})")
             print(("DELIVERABLE: " if st_.deliverable else "BLOCKED: ") + st_.reason)
             return 0 if st_.deliverable else 1
+        from . import tracing
+
+        with tracing.span("resume.deliver", job=job.name, deliverable=st_.deliverable, rounds=st_.rounds,
+                          verdict=st_.latest.verdict if st_.latest else "", reason=st_.reason,
+                          accepted_open_issues=bool(args.accept_open_issues and st_.deliverable
+                                                    and st_.latest and st_.latest.verdict != "PASS")):
+            pass
         if not st_.deliverable:
             print(f"BLOCKED: {st_.reason}", file=sys.stderr)
             return 1
@@ -272,6 +316,25 @@ def main(argv: list[str] | None = None) -> int:
         except apps_mod.ApplicationError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+    if args.cmd == "dashboard":
+        from . import dashboard
+
+        tr = Path(args.traces) if args.traces else None
+        ad = Path(args.applications) if args.applications else None
+        if args.export:
+            out = dashboard.export(Path(args.export), tr, ad, title=args.title)
+            print(f"Wrote {out}")
+            return 0
+        dashboard.serve(args.host, args.port, tr, ad, open_browser=args.open, allow_hosts=args.allow_host,
+                        read_only=args.read_only)
+        return 0
+    if args.cmd == "demo-data":
+        from . import demo
+
+        res = demo.generate(Path(args.out), days=args.days, jobs=args.jobs, seed=args.seed)
+        print(f"Wrote {res['spans']} spans and {res['applications_count']} applications under {args.out}/ (fictional)")
+        print(f"View: python3 -m resume_agent dashboard --traces {res['traces']} --applications {res['applications']}")
+        return 0
     if args.cmd == "serve":
         from .server import run
 

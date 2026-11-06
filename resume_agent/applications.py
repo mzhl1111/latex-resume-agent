@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import gate, paths
+from . import gate, paths, tracing
 from .jd_fetch import slugify
 
 SCHEMA_VERSION = 1
@@ -256,6 +256,26 @@ def record_application(
     jobs_dir: Path | None = None,
 ) -> dict:
     """Record a submitted application. Returns {"id", "path", "created", "warnings", "record"}."""
+    with tracing.span("application.record", job=slug or "", platform=detect_platform(job_url or ""),
+                      submitted_by=submitted_by or "") as s:
+        res = _record(**{k: v for k, v in locals().items() if k != "s"})
+        rec = res["record"]
+        s.set(
+            created=res["created"], application_id=res["id"], company=rec["job"].get("company", ""),
+            role=rec["job"].get("role", ""), questions=len(rec.get("questions", [])),
+            cover_letter=bool(rec.get("cover_letter")),
+            verified=(rec["resume"].get("verification") or {}).get("deliverable"),
+            matches_generated=rec["resume"].get("matches_generated"), warnings=len(res["warnings"]),
+        )
+        return res
+
+
+def _record(
+    *,
+    job_url, slug, resume_pdf_base64, company, role, location, submitted_at, platform, confirmation_id,
+    submitted_by, cover_letter_text, cover_letter_base64, cover_letter_filename, questions, attachments,
+    jd_text, notes, extra, idempotency_key, fetch_jd_snapshot, apps_dir, jobs_dir,
+) -> dict:
     if not re.match(r"^https?://", job_url or ""):
         raise ApplicationError("job_url must be an http(s) URL")
     if not slug and not resume_pdf_base64:
@@ -414,6 +434,14 @@ def update_application(
     apps_dir: Path | None = None,
 ) -> dict:
     """Append a timeline event (status change and/or note) and merge extra fields."""
+    with tracing.span("application.update", application_id=app_id, status=status or "") as s:
+        rec = _update(app_id, status=status, note=note, at=at, by=by, add_questions=add_questions,
+                      confirmation_id=confirmation_id, extra=extra, apps_dir=apps_dir)
+        s.set(company=rec["job"].get("company", ""), status=rec["status"])
+        return rec
+
+
+def _update(app_id, *, status, note, at, by, add_questions, confirmation_id, extra, apps_dir) -> dict:
     if status and status not in STATUSES:
         raise ApplicationError(f"status must be one of {', '.join(STATUSES)}")
     if not (status or note or add_questions or confirmation_id or extra):
@@ -464,3 +492,31 @@ def list_applications(
         cutoff = datetime.fromisoformat(_parse_time(since))
         rows = [r for r in rows if datetime.fromisoformat(r["submitted_at"]) >= cutoff]
     return rows
+
+
+READABLE = {".pdf": "application/pdf", ".md": "text/markdown", ".txt": "text/plain", ".docx":
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".doc": "application/msword",
+            ".rtf": "application/rtf", ".html": "text/html", ".png": "image/png", ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg"}
+
+
+def list_files(app_id: str, *, apps_dir: Path | None = None) -> list[dict]:
+    folder = _folder(app_id, apps_dir)
+    return [
+        {"name": str(p.relative_to(folder)), "bytes": p.stat().st_size, "mime": READABLE[p.suffix.lower()]}
+        for p in sorted(folder.rglob("*"))
+        if p.is_file() and p.suffix.lower() in READABLE
+    ]
+
+
+def read_file(app_id: str, name: str, *, apps_dir: Path | None = None) -> tuple[bytes, str]:
+    """Bytes + MIME type of one file in an application folder (e.g. resume.pdf, cover_letter.md,
+    jd.md, answers.md, attachments/portfolio.pdf). Refuses anything outside the folder."""
+    folder = _folder(app_id, apps_dir).resolve()
+    if not re.fullmatch(r"(attachments/)?[A-Za-z0-9][A-Za-z0-9._-]*", name or ""):
+        raise ApplicationError(f"Invalid file name: {name!r}")
+    target = (folder / name).resolve()
+    mime = READABLE.get(target.suffix.lower())
+    if not mime or folder not in target.parents or not target.is_file():
+        raise ApplicationError(f"No file {name!r} in {app_id}")
+    return target.read_bytes(), mime
